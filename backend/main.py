@@ -307,12 +307,25 @@ async def me(role=Depends(auth)):return {'role':role}
 @app.get('/api/settings',dependencies=[Depends(auth)])
 async def get_settings(role=Depends(auth)):
     if role!='admin':raise HTTPException(403,'Administrator permission required')
-    return {'settings':await asyncio.to_thread(work.settings),'version':await asyncio.to_thread(work.settings_version)}
+    try:
+        return {'settings':await asyncio.to_thread(work.settings),'version':await asyncio.to_thread(work.settings_version)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception('Settings read failed')
+        raise HTTPException(503, 'Unable to read Google Sheets settings; inspect Render logs') from exc
 
 @app.put('/api/settings')
 async def save_settings(payload:SettingsUpdate,role=Depends(admin_only)):
     if lock.locked():raise HTTPException(409,'Batch or sync in progress')
-    async with lock:return await asyncio.to_thread(work.save_settings,payload.settings,role,payload.version)
+    async with lock:
+        try:
+            return await asyncio.to_thread(work.save_settings,payload.settings,role,payload.version)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.exception('Settings save failed')
+            raise HTTPException(503, 'Unable to save and verify Google Sheets settings; inspect Render logs') from exc
 
 @app.get('/api/settings/history')
 async def settings_history(role=Depends(admin_only)):
@@ -546,8 +559,23 @@ async def dids():
         return {'items':items,'configured':True,'running':state['running']}
     except HTTPException: raise
     except Exception as exc:
-        log.error('Snapshot read failed: %s',type(exc).__name__)
-        raise HTTPException(503,'Unable to read Google Sheets snapshot')
+        log.exception('Snapshot read failed (Google Sheets inventory)')
+        if isinstance(exc, NameError):
+            raise HTTPException(503, 'Inventory backend configuration error; inspect Render traceback') from exc
+        raise HTTPException(503,'Unable to read Google Sheets snapshot') from exc
+
+@app.get('/api/inventory/status',dependencies=[Depends(auth)])
+async def inventory_status():
+    """Read-only first-run check. Empty snapshots are not interpreted as live zero DIDs."""
+    try:
+        rows=await asyncio.to_thread(get_rows,'Sync_Status',['last_sync_utc','active','inactive','pool'])
+        latest=rows[-1] if rows else None
+        return {'initialized':bool(latest and latest.get('last_sync_utc')),
+                'last_sync_utc':str(latest.get('last_sync_utc','')) if latest else '',
+                'counts':{k:int(latest.get(k,0) or 0) for k in ('active','inactive','pool')} if latest else None}
+    except Exception as exc:
+        log.exception('Inventory status check failed')
+        raise HTTPException(503,'Unable to read Google Sheets initialization status') from exc
 
 @app.post('/api/sync',dependencies=[Depends(auth)])
 async def sync():
@@ -558,8 +586,8 @@ async def sync():
             order=await asyncio.to_thread(snapshot_sync,lists)
             return {'ok':True,'counts':{k:len(v) for k,v in lists.items()},'pool_order':order}
         except Exception as exc:
-            log.error('Sync failed: %s',type(exc).__name__)
-            raise HTTPException(502,str(exc))
+            log.exception('MCube inventory sync failed')
+            raise HTTPException(502,'Inventory synchronization failed; inspect Render logs') from exc
 
 def snapshot_sync(lists):
     # Snapshot is synchronous because gspread is a synchronous client.
