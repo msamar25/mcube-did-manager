@@ -243,16 +243,31 @@ async def mcube(client, endpoint, payload):
     return data
 
 def records(data):
-    if isinstance(data,list): return data
-    if data.get('status') is False: raise RuntimeError(str(data.get('msg','MCube rejected listing')))
-    for key in ('did_no','data','result','items','Resource','records'):
-        if isinstance(data.get(key),list): return data[key]
-    raise RuntimeError('Unknown MCube list response format')
+    """Strict DID response parsing. Never turn unknown payloads into an empty inventory."""
+    if isinstance(data, list): return data
+    if not isinstance(data, dict): raise RuntimeError('MCube listing returned an unsupported response')
+    status=str(data.get('status','')).lower()
+    if status in ('false','fail','failed','error','0'):
+        raise RuntimeError('MCube rejected DID listing; verify bearer token and API permissions')
+    for key in ('did_no','data','result','items','Resource','records','dids','did_list','didList','DIDList'):
+        value=data.get(key)
+        if isinstance(value,list):return value
+        if isinstance(value,dict):
+            for nested in ('data','items','records','did_no','dids','result'):
+                if isinstance(value.get(nested),list):return value[nested]
+    # Some MCube endpoints return a single DID object; do not accept unrelated objects.
+    if any(k in data for k in ('did_no','did')) and not isinstance(data.get('did_no'),list):
+        return [data]
+    safe_keys=','.join(sorted(str(k) for k in data.keys())[:12])
+    raise RuntimeError(f'MCube DID listing schema not recognized (response keys: {safe_keys}). Check Render logs; no changes were made.')
 
 async def fetch_lists(client):
     result={}
     for category in ('active','inactive','pool'):
-        raw=records(await mcube(client,'get-did-list',{'did':category}))
+        try:
+            raw=records(await mcube(client,'get-did-list',{'did':category}))
+        except Exception as exc:
+            raise RuntimeError(f'{category} DID listing failed: {exc}') from exc
         items=[]
         for x in raw:
             if isinstance(x,str): x={'did_no':x}
