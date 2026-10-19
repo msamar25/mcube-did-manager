@@ -275,9 +275,15 @@ async def fetch_lists(client):
             did=str(x.get('did_no') or x.get('did') or '').strip()
             if not did: continue
             items.append({'did':did,'agent':str(x.get('agent_name') or x.get('Agent_Name') or ''),'agent_number':str(x.get('agent_no') or x.get('agent_number') or ''),'operator':str(x.get('operator') or ''),'status':category})
-        if len(items)!=len(set(x['did'] for x in items)):
-            raise RuntimeError(f'Duplicate DID in {category} response')
-        result[category]=items
+        # Inventory is observational: preserve every MCube row, including duplicates.
+        # Never block a read-only sync for inconsistent MCube inventory.
+        counts = {}
+        for item in items:
+            counts[item['did']] = counts.get(item['did'], 0) + 1
+        duplicates = sum(n - 1 for n in counts.values() if n > 1)
+        if duplicates:
+            log.warning('MCube %s listing contains %d repeated DID rows (preserved)', category, duplicates)
+        result[category] = items
     return result
 
 async def snapshot(lists):
@@ -547,8 +553,12 @@ def display_inventory():
     active=get_rows('Active_DIDs',DID_HEADERS)
     inactive=get_rows('Inactive_DIDs',DID_HEADERS)
     pool=get_rows('DID_Pool_FIFO',FIFO_HEADERS)
-    items=[{'did':str(r.get('did_no','')),'agent':r.get('agent_name',''),'agent_number':str(r.get('agent_no','')),'operator':r.get('operator',''),'status':cat} for cat,rows in [('active',active),('inactive',inactive)]]
+    items=[{'did':str(r.get('did_no','')),'agent':r.get('agent_name',''),'agent_number':str(r.get('agent_no','')),'operator':r.get('operator',''),'status':cat} for cat,rows in [('active',active),('inactive',inactive)] for r in rows]
     items += [{'did':str(r['did_no']),'agent':'','agent_number':'','operator':r.get('operator',''),'status':'pool','fifo':r.get('fifo_position')} for r in pool]
+    from collections import Counter
+    counts=Counter((item['status'], item['did']) for item in items)
+    for item in items:
+        item['duplicate']=counts[(item['status'], item['did'])]>1
     with _snapshot_cache_lock:_snapshot_cache['inventory']=(time.monotonic(),items)
     return items
 
@@ -557,8 +567,7 @@ async def dids():
     try:
         items=await asyncio.to_thread(display_inventory)
         return {'items':items,'configured':True,'running':state['running']}
-    except HTTPException:
-        raise
+    except HTTPException: raise
     except Exception as exc:
         log.exception('Snapshot read failed (Google Sheets inventory)')
         if isinstance(exc, NameError):
