@@ -1,0 +1,1 @@
+OTP input fix: normalizes to exactly six digits, removes native pattern validation, validates before API submission. Deployment: copy project contents to private GitHub repository, commit and push, then Render deploy latest commit. Request a NEW OTP after deployment. No environment variable changes needed.
