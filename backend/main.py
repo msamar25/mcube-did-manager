@@ -544,10 +544,14 @@ async def dids():
     try:
         items=await asyncio.to_thread(display_inventory)
         return {'items':items,'configured':True,'running':state['running']}
-    except HTTPException: raise
-    except Exception as exc:
-        log.error('Snapshot read failed: %s',type(exc).__name__)
-        raise HTTPException(503,'Unable to read Google Sheets snapshot')
+    except HTTPException:
+    raise
+    except Exception:
+        log.exception('Snapshot read failed')
+    raise HTTPException(
+        status_code=503,
+        detail='Unable to read Google Sheets snapshot'
+    )
 
 @app.post('/api/sync',dependencies=[Depends(auth)])
 async def sync():
