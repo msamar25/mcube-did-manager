@@ -557,7 +557,8 @@ async def dids():
     try:
         items=await asyncio.to_thread(display_inventory)
         return {'items':items,'configured':True,'running':state['running']}
-    except HTTPException: raise
+    except HTTPException:
+        raise
     except Exception as exc:
         log.exception('Snapshot read failed (Google Sheets inventory)')
         if isinstance(exc, NameError):
