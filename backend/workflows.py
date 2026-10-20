@@ -116,7 +116,7 @@ class Workflows:
   payload={'search_val':['2','3','4','5'],'search_type':'Roles','searchFilter':'','daterange':None,'Authorization':''}
   async with httpx.AsyncClient(timeout=45) as client:
    payload['Authorization']=await fresh_token(self.c,client)
-   r=await client.post(url,json=payload,headers={'Content-Type':'application/json'})
+   r=await client.post(url,content=json.dumps(payload,separators=(',',':')),headers={'Accept':'application/json, text/plain, */*','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','Origin':'https://unext-acquisition.mcube.com','Referer':'https://unext-acquisition.mcube.com/'})
    r.raise_for_status();data=r.json()
   # MCube installations return different wrappers. Accept only arrays with employee fields.
   def find_arrays(node,depth=0):
@@ -165,7 +165,7 @@ class Workflows:
    for _ in range(max_pages):
     payload={'arr':{'clicktocalldid':str(cfg['request_did']),'duration_type':'total_duration'},'type':'today','filters':None,'tabtype':'','filter':'','month':'','offset':offset,'limit':limit,'Authorization':''}
     payload['Authorization']=await fresh_token(self.c,client)
-    r=await client.post(url,json=payload,headers={'Content-Type':'application/json'})
+    r=await client.post(url,content=json.dumps(payload,separators=(',',':')),headers={'Accept':'application/json, text/plain, */*','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','Origin':'https://unext-acquisition.mcube.com','Referer':'https://unext-acquisition.mcube.com/'})
     r.raise_for_status();data=r.json()
     def find_calls(node,depth=0):
      if depth>5:return None
@@ -181,7 +181,7 @@ class Workflows:
        if found is not None:return found
      return None
     page=data.get('clicktocall') if isinstance(data,dict) else None
-    if not isinstance(page,list):raise RuntimeError('Unrecognized inbound response schema; no requests written')
+    if not isinstance(page,list):raise RuntimeError('Unrecognized inbound response schema; expected clicktocall list; no requests written')
     if any(not isinstance(item,dict) for item in page):raise RuntimeError('Invalid MCube call row; no requests written')
     collected.extend(page)
     if len(page)<limit:break
@@ -212,16 +212,22 @@ class Workflows:
   pending={str(x['agent_number']):x for x in self.requests() if x.get('status') in ('pending','review_required','approved','processing')}
   recent=self.recent_agents(cfg['recent_replacement_days'])
   created=0;repeated=0;ignored=0
+  skipped={'invalid_record':0,'not_inbound':0,'not_cancelled':0,'missing_or_seen_callid':0,'employee_not_found':0,'no_unique_active_did':0,'request_did_mismatch':0,'invalid_call_time':0}
   for call in calls:
-   if not isinstance(call,dict):continue
-   if str(call.get('direction','')).strip().lower()!='inbound' or str(call.get('dialstatus','')).strip().lower()!='cancel':continue
+   if not isinstance(call,dict):skipped['invalid_record']+=1;continue
+   direction=str(call.get('direction','')).strip().lower()
+   status=str(call.get('dialstatus','')).strip().lower()
+   if direction != 'inbound':skipped['not_inbound']+=1;continue
+   if status != 'cancel':skipped['not_cancelled']+=1;continue
    callid=str(call.get('callid','')).strip();phone=self.phone(call.get('callto'))
-   if not callid or callid in previous or phone not in agents:continue
+   if not callid or callid in previous:skipped['missing_or_seen_callid']+=1;continue
+   if phone not in employee_map:skipped['employee_not_found']+=1;continue
+   if phone not in agents:skipped['no_unique_active_did']+=1;continue
    # The request DID is enforced by the server-side query. Some MCube rows omit this field;
    # reject explicit mismatches but accept absent fields.
-   if call.get('clicktocalldid') and self.phone(call.get('clicktocalldid'))!=self.phone(cfg['request_did']):continue
+   if call.get('clicktocalldid') and self.phone(call.get('clicktocalldid'))!=self.phone(cfg['request_did']):skipped['request_did_mismatch']+=1;continue
    agent=agents[phone];emp=employee_map[phone];first=self.call_time(call.get('starttime'));end=self.call_time(call.get('endtime'))
-   if not first:continue
+   if not first:skipped['invalid_call_time']+=1;continue
    req=pending.get(phone)
    if req:
     req['last_call_utc']=max((str(req.get('last_call_utc') or ''),first),key=lambda x: datetime.fromisoformat(x.replace('Z','+00:00')).timestamp() if x else 0);req['call_count']=int(req.get('call_count') or 0)+1
@@ -241,7 +247,7 @@ class Workflows:
     if cfg['email_on_queue']:
      await self.send_email(req,'queued',cfg)
   self.set_sync('calls_sync',self.now())
-  return {'created':created,'repeated':repeated,'ignored':ignored,'fetched':len(calls),'request_did':cfg['request_did']}
+  return {'created':created,'repeated':repeated,'ignored':sum(skipped.values()),'fetched':len(calls),'request_did':cfg['request_did'],'skipped_reasons':skipped,'employee_count':len(employees),'active_did_count':len(active)}
  def recent_agents(self,days):
   cutoff=datetime.now(timezone.utc)-timedelta(days=int(days));recent={}
   for row in self.read('Change_Logs',self.c.LOG_HEADERS):
@@ -255,7 +261,7 @@ class Workflows:
   cfg=cfg or self.settings()
   # MCube bridges exenumber first, then dials custnumber. Keep agent's
   # verified MCube number as exenumber for agent notifications.
-  level2 = kind == 'queued_level2' or (kind == 'reminder' and bool(target) and target in (cfg.get('second_contact_number'),cfg.get('level2_custnumber')))
+  level2 = kind in ('queued_level2', 'reminder_level2') or (kind == 'reminder' and bool(target) and target in (cfg.get('second_contact_number'),cfg.get('level2_custnumber')))
   if kind == 'completed':
    exenumber=self.phone(req.get('agent_number'))
    custnumber=self.phone(cfg.get('agent_notification_custnumber') or cfg.get('request_did'))
@@ -295,29 +301,54 @@ class Workflows:
    status='failed';details=type(exc).__name__
   self.append('Notification_Logs',NOTIFY_HEADERS,[self.now(),req['request_id'],f'email_{kind}',to,status,details])
   return {'status':status}
+ @staticmethod
+ def reminder_timestamp(value):
+  """Legacy naive Sheets timestamps were UTC; new values carry IST offset."""
+  stamp=datetime.fromisoformat(str(value).strip().replace('Z','+00:00'))
+  return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp.astimezone(timezone.utc)
  async def due_reminders(self):
   cfg=await asyncio.to_thread(self.settings)
-  if not cfg['reminder_enabled']:return {'processed':0,'disabled':True}
-  now=datetime.now(timezone.utc);processed=0
+  summary={'processed':0,'submitted':0,'rejected':0,'skipped':0,'uncertain':0,
+           'eligible':0,'pending':0,'not_due':0,'max_attempts':0,'invalid_timestamp':0,
+           'disabled':not bool(cfg['reminder_enabled']),'details':[]}
+  if summary['disabled']:return summary
+  now=datetime.now(timezone.utc)
   for req in await asyncio.to_thread(self.requests):
    if req.get('status') not in ('pending','review_required','approved'):continue
-   try:created=datetime.fromisoformat(str(req['first_call_utc']).replace('Z','+00:00'))
-   except Exception:continue
-   elapsed=(now-created).total_seconds()/60
-   count=int(req.get('reminder_count') or 0)
-   if count>=cfg['reminder_max_attempts'] or elapsed<cfg['reminder_first_minutes']:continue
+   summary['pending']+=1
+   try:
+    created=self.reminder_timestamp(req['first_call_utc'])
+    elapsed=(now-created).total_seconds()/60
+    count=int(req.get('reminder_count') or 0)
+   except (ValueError,TypeError,OverflowError,KeyError):
+    summary['invalid_timestamp']+=1;continue
+   if count>=int(cfg['reminder_max_attempts']):summary['max_attempts']+=1;continue
+   if elapsed<float(cfg['reminder_first_minutes']):summary['not_due']+=1;continue
    last=req.get('last_reminder_utc','')
    if last:
     try:
-     if (now-datetime.fromisoformat(str(last).replace('Z','+00:00'))).total_seconds()/60<cfg['reminder_interval_minutes']:continue
-    except Exception:pass
-   target=(cfg.get('second_contact_number') or cfg.get('level2_custnumber')) if elapsed>=cfg['reminder_escalation_minutes'] and (cfg.get('second_contact_number') or cfg.get('level2_custnumber')) else (cfg.get('first_contact_number') or cfg.get('level1_custnumber'))
-   # Journal intent first to avoid duplicate calls if process crashes mid-request.
+     if (now-self.reminder_timestamp(last)).total_seconds()/60<float(cfg['reminder_interval_minutes']):
+      summary['not_due']+=1;continue
+    except (ValueError,TypeError,OverflowError):
+     # Avoid duplicate calls if the last attempt time cannot be verified.
+     summary['invalid_timestamp']+=1;continue
+   summary['eligible']+=1
+   level2=elapsed>=float(cfg['reminder_escalation_minutes'])
+   kind='reminder_level2' if level2 else 'reminder'
+   # Persist attempt intent before calling MCube. Even an uncertain response
+   # must not be retried automatically: MCube may have initiated the call.
    req['reminder_count']=count+1;req['last_reminder_utc']=self.now()
    await asyncio.to_thread(self.update_request,req)
-   await self.outbound_notification(req,'reminder',cfg,target)
-   processed+=1
-  return {'processed':processed}
+   try: result=await self.outbound_notification(req,kind,cfg)
+   except Exception as exc:
+    log.exception('Reminder notification failed for request %s',req.get('request_id'))
+    result={'status':'uncertain','detail':type(exc).__name__}
+   status=str(result.get('status','uncertain'))
+   if status not in ('submitted','rejected','skipped','uncertain'):status='uncertain'
+   summary[status]+=1;summary['processed']+=1
+   summary['details'].append({'request_id':req.get('request_id'), 'result':status,
+                              'reason':str(result.get('reason') or result.get('detail') or '')[:160]})
+  return summary
  def review(self,request_id,approved,reason,actor):
   req=next((r for r in self.requests() if str(r['request_id'])==request_id),None)
   if not req:raise HTTPException(404,'Request not found')
