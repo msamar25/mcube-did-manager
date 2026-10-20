@@ -110,33 +110,38 @@ class Workflows:
  async def fetch_employee_directory(self):
   from .mcube_config_auth import fresh_token
   url=os.getenv('MCUBE_CONFIG_BASE_URL','https://config.mcube.com/Restmcube-api').rstrip('/')+'/emp-filter'
-  payload={'search_val':['2'],'search_type':'Roles','searchFilter':'','daterange':None,'Authorization':''}
+  # Request all four employee roles; the former ['2'] filter omitted other accounts.
+  payload={'search_val':['2','3','4','5'],'search_type':'Roles','searchFilter':'','daterange':None,'Authorization':''}
   async with httpx.AsyncClient(timeout=45) as client:
    payload['Authorization']=await fresh_token(self.c,client)
    r=await client.post(url,json=payload,headers={'Content-Type':'application/json'})
    r.raise_for_status();data=r.json()
-  # MCube config API is undocumented: normalize known wrappers, reject unrecognized response.
+  # MCube installations return different wrappers. Accept only arrays with employee fields.
   def find_arrays(node,depth=0):
-   if depth>5:return []
+   if depth>6:return None
    if isinstance(node,list):
-    if node and isinstance(node[0],dict) and any(k in node[0] for k in ('emp_phone','agent_number','emp_mobile')):return node
+    if node and all(isinstance(x,dict) for x in node) and any(any(k in x for k in ('emp_phone','agent_number','emp_mobile','emp_alternative_phone')) for x in node):return node
     for item in node:
      out=find_arrays(item,depth+1)
-     if out:return out
+     if out is not None:return out
    if isinstance(node,dict):
+    for key in ('employees','employee','agents','data','result','response','records','list'):
+     if key in node:
+      out=find_arrays(node[key],depth+1)
+      if out is not None:return out
     for v in node.values():
      out=find_arrays(v,depth+1)
-     if out:return out
-   return []
-  agents=data.get('employees') if isinstance(data,dict) else None
-  if not isinstance(agents,list):raise RuntimeError('Missing employees array; existing directory preserved')
-  if not agents:raise RuntimeError('Empty employee response; existing directory preserved')
+     if out is not None:return out
+   return None
+  agents=find_arrays(data)
+  if agents is None:raise RuntimeError('Unrecognized MCube employee response; existing directory preserved')
+  if not agents:raise RuntimeError('Empty MCube employee response; existing directory preserved')
   now=self.now();result=[];seen=set()
   for a in agents:
-   number=self.phone(a.get('emp_phone'))
+   number=self.phone(a.get('emp_phone') or a.get('agent_number') or a.get('emp_mobile') or a.get('emp_alternative_phone'))
    if not number or number in seen:continue
    seen.add(number)
-   result.append([number,str(a.get('agent_name') or a.get('name') or ''),str(a.get('email') or a.get('emp_email') or ''),now])
+   result.append([number,str(a.get('agent_name') or a.get('emp_name') or a.get('name') or ''),str(a.get('email') or a.get('emp_email') or ''),now])
   if not result:raise RuntimeError('Employee directory empty; preserving previous snapshot')
   self.replace('Employee_Directory',EMP_HEADERS,result)
   self.set_sync('employee_sync',now)
@@ -183,10 +188,20 @@ class Workflows:
  async def sync_calls(self):
   cfg,calls=await self.fetch_calls()
   active=self.read('Active_DIDs',self.c.DID_HEADERS)
+  employees=self.employees()
+  # Employees are the authoritative eligibility list for matching inbound callto.
+  # A DID assignment is additionally required to make a request actionable.
+  employee_map={};duplicate_employees=set()
+  for emp in employees:
+   number=self.phone(emp.get('agent_number'))
+   if not number:continue
+   if number in employee_map:duplicate_employees.add(number)
+   else:employee_map[number]=emp
+  for number in duplicate_employees:employee_map.pop(number,None)
   agents={};ambiguous=set()
   for row in active:
    number=self.phone(row.get('agent_no') or row.get('agent_number'))
-   if not number:continue
+   if not number or number not in employee_map:continue
    if number in agents:ambiguous.add(number)
    else:agents[number]=row
   for number in ambiguous:agents.pop(number,None)
@@ -201,14 +216,14 @@ class Workflows:
    if not callid or callid in previous or phone not in agents:continue
    # The clicktocalldid is already applied server-side; reject any mismatching field in a returned row.
    if self.phone(call.get('clicktocalldid'))!=self.phone(cfg['request_did']):continue
-   agent=agents[phone];first=self.call_time(call.get('starttime'));end=self.call_time(call.get('endtime'))
+   agent=agents[phone];emp=employee_map[phone];first=self.call_time(call.get('starttime'));end=self.call_time(call.get('endtime'))
    if not first:continue
    req=pending.get(phone)
    if req:
     req['last_call_utc']=max((str(req.get('last_call_utc') or ''),first),key=lambda x: datetime.fromisoformat(x.replace('Z','+00:00')).timestamp() if x else 0);req['call_count']=int(req.get('call_count') or 0)+1
     self.update_request(req);repeated+=1
    else:
-    emp=self.find_employee(phone);reqid=str(uuid.uuid4())
+    reqid=str(uuid.uuid4())
     warning=phone in recent
     req=dict.fromkeys(REQUEST_HEADERS,'')
     req.update(request_id=reqid,callid=callid,callto=phone,agent_number=phone,agent_name=agent.get('agent_name','') or emp.get('agent_name',''),agent_email=emp.get('email',''),current_did=str(agent.get('did_no','')),first_call_utc=first,last_call_utc=first,call_count=1,status='review_required' if warning and cfg['require_recent_review'] else 'pending',recent_warning='yes' if warning else 'no',reminder_count=0)
