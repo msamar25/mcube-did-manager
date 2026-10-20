@@ -19,6 +19,8 @@ services:
         sync: false
       - key: OPERATOR_TOKEN
         sync: false
+      - key: MCUBE_CREDENTIAL_ENCRYPTION_KEY
+        sync: false
       - key: MCUBE_CONFIG_TOKEN
         sync: false
       - key: BREVO_API_KEY

@@ -1,6 +1,7 @@
 """MCube DID replacement: sequential, fail-closed, Sheets-journaled operations."""
 import asyncio, json, logging, os, uuid, time, hmac, hashlib, secrets, base64, threading, random
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+IST = timezone(timedelta(hours=5, minutes=30))
 from pathlib import Path
 from typing import Literal
 import httpx
@@ -169,7 +170,7 @@ DID_HEADERS = ['did_no','agent_name','agent_no','operator']
 
 def append_event(batch, event, old='', new='', agent='', name='', result='', details=''):
     ws = worksheet(sheet(), 'Change_Logs', LOG_HEADERS)
-    ws.append_row([datetime.now(timezone.utc).isoformat(),batch,event,old,new,agent,name,result,str(details)[:1000]], value_input_option='RAW')
+    ws.append_row([datetime.now(IST).isoformat(timespec="seconds"),batch,event,old,new,agent,name,result,str(details)[:1000]], value_input_option='RAW')
 
 def get_rows(name, headers):
     return _quota_call(lambda: worksheet(sheet(),name,headers).get_all_records())
@@ -296,7 +297,7 @@ async def snapshot(lists):
     else:
         order=fresh  # MCube's latest returned order becomes new FIFO when pool membership changes
     lookup={r['did']:r for r in lists['pool']}
-    stamp=datetime.now(timezone.utc).isoformat()
+    stamp=datetime.now(IST).isoformat(timespec="seconds")
     # Persist FIFO before the other display-only snapshots.
     replace_rows('DID_Pool_FIFO',FIFO_HEADERS,[[i+1,d,lookup[d]['operator'],'yes',stamp] for i,d in enumerate(order)])
     for cat,title in [('active','Active_DIDs'),('inactive','Inactive_DIDs')]:
@@ -332,6 +333,39 @@ async def save_settings(payload:SettingsUpdate,role=Depends(admin_only)):
         except Exception as exc:
             log.exception('Settings save failed')
             raise HTTPException(503, 'Unable to save and verify Google Sheets settings; inspect Render logs') from exc
+
+class MCubeCredentialsInput(BaseModel):
+    username: str = Field(min_length=1,max_length=256)
+    password: str = Field(min_length=1,max_length=2048)
+
+@app.get('/api/mcube-config/credentials/status')
+async def mcube_credentials_status(role=Depends(admin_only)):
+    from .mcube_config_auth import configured
+    try:return {'configured':await asyncio.to_thread(configured,sys.modules[__name__])}
+    except HTTPException:raise
+    except Exception as exc:
+        log.exception('MCube credential status unavailable')
+        raise HTTPException(503,'Cannot read MCube credential status') from exc
+
+@app.put('/api/mcube-config/credentials')
+async def save_mcube_credentials(body:MCubeCredentialsInput,role=Depends(admin_only)):
+    from .mcube_config_auth import save
+    if lock.locked():raise HTTPException(409,'Another operation is running')
+    async with lock:
+        try:
+            await asyncio.to_thread(save,sys.modules[__name__],body.username,body.password)
+            return {'ok':True,'configured':True}
+        except HTTPException:raise
+        except Exception as exc:
+            log.exception('MCube credential save failed')
+            raise HTTPException(503,'MCube credentials could not be saved') from exc
+
+@app.post('/api/mcube-config/credentials/test')
+async def test_mcube_credentials(role=Depends(admin_only)):
+    from .mcube_config_auth import fresh_token
+    async with httpx.AsyncClient(timeout=30) as client:
+        await fresh_token(sys.modules[__name__],client)
+    return {'ok':True,'message':'MCube config login returned a recognized token'}
 
 @app.get('/api/settings/history')
 async def settings_history(role=Depends(admin_only)):
@@ -434,7 +468,7 @@ def queue_events():
 
 def queue_append(qid, event, actor='', dids=None, mapping=None, details=''):
     worksheet(sheet(), 'Operation_Queue', QUEUE_HEADERS).append_row([
-        datetime.now(timezone.utc).isoformat(), qid, event, actor,
+        datetime.now(IST).isoformat(timespec="seconds"), qid, event, actor,
         json.dumps(dids or []), json.dumps(mapping or {}), str(details)[:500]
     ], value_input_option='RAW')
     invalidate_snapshots('queue_display')
@@ -661,7 +695,8 @@ async def run_batch(batch,dids,request_map,lease):
                         raise RuntimeError('Request/active agent mapping changed; batch stopped')
             if any(d not in active or not active[d]['agent_number'] for d in dids): raise RuntimeError('Some selected DIDs are no longer active or missing agent numbers')
             await asyncio.to_thread(append_event,batch,'BATCH_VALIDATED',result='OK',details=f'{len(dids)} assignments')
-            # Strict sequential operations. No next agent until current verification completes.
+            # Strict sequential operations. Quarantine any new DID involved in a partial failure.
+            quarantined=set()
             for old in dids:
                 agent=active[old]['agent_number']; name=active[old]['agent']
                 try:
@@ -671,7 +706,7 @@ async def run_batch(batch,dids,request_map,lease):
                     live_pool={x['did'] for x in live['pool']}
                     if old not in live_active or work.phone(live_active[old]['agent_number'])!=work.phone(agent):
                         raise RuntimeError('Current assignment changed; no action taken')
-                    eligible=[d for d in order if d in live_pool]
+                    eligible=[d for d in order if d in live_pool and d not in quarantined]
                     if not eligible: raise RuntimeError('No available FIFO DID; no action taken')
                     new=eligible[0]
                     await asyncio.to_thread(append_event,batch,'DEACTIVATION_STARTED',old,new,agent,name,'PENDING')
@@ -681,7 +716,7 @@ async def run_batch(batch,dids,request_map,lease):
                         raise RuntimeError('Deactivation outcome uncertain; batch stopped for reconciliation')
                     if response.get('status') is not True:
                         await asyncio.to_thread(append_event,batch,'DEACTIVATION_FAILED',old,new,agent,name,'FAILED',response.get('msg','Rejected'))
-                        state['results'].append({'old':old,'new':new,'status':'failed','reason':response.get('msg','Rejected')})
+                        state['results'].append({'old':old,'new':new,'status':'failed','stage':'deactivation','reason':response.get('msg','Rejected')})
                         if old in request_map:
                             req=next((r for r in await asyncio.to_thread(work.requests) if r['request_id']==request_map[old]),None)
                             if req:
@@ -696,8 +731,26 @@ async def run_batch(batch,dids,request_map,lease):
                         await asyncio.to_thread(append_event,batch,'ACTIVATION_UNCERTAIN',old,new,agent,name,'RECONCILE',str(exc))
                         raise RuntimeError('Activation outcome uncertain; batch stopped for reconciliation')
                     if response.get('status') is not True:
-                        await asyncio.to_thread(append_event,batch,'ACTIVATION_FAILED',old,new,agent,name,'PARTIAL_FAILURE',response.get('msg','Rejected'))
-                        raise RuntimeError('Old DID deactivated but activation failed; batch stopped for recovery')
+                        reason=response.get('msg','Activation rejected')
+                        await asyncio.to_thread(append_event,batch,'ACTIVATION_FAILED',old,new,agent,name,'PARTIAL_FAILURE',reason)
+                        # Do not reuse this candidate, even if MCube still reports it in pool.
+                        quarantined.add(new)
+                        # Verify the outcome before proceeding. Uncertain state must stop the batch.
+                        verified=await fetch_lists(client)
+                        still_active=any(x['did']==old and work.phone(x['agent_number'])==work.phone(agent) for x in verified['active'])
+                        newly_active=any(x['did']==new for x in verified['active'])
+                        if still_active or newly_active:
+                            await asyncio.to_thread(append_event,batch,'PARTIAL_FAILURE_UNCERTAIN',old,new,agent,name,'RECONCILE','MCube state inconsistent with activation rejection')
+                            raise RuntimeError('Activation failed and inventory is inconsistent; stop for reconciliation')
+                        await asyncio.to_thread(snapshot_sync,verified)
+                        state['results'].append({'old':old,'new':new,'status':'failed','stage':'activation','reason':str(reason)+'; old DID deactivated; agent requires manual recovery'})
+                        if old in request_map:
+                            req=next((r for r in await asyncio.to_thread(work.requests) if r['request_id']==request_map[old]),None)
+                            if req:
+                                req['status']='needs_reconciliation'
+                                await asyncio.to_thread(work.update_request,req)
+                        state['done']+=1
+                        continue
                     await asyncio.to_thread(append_event,batch,'ACTIVATED',old,new,agent,name,'SUCCESS',response.get('msg',''))
                     verified=await fetch_lists(client)
                     if not any(x['did']==new and work.phone(x['agent_number'])==work.phone(agent) for x in verified['active']):
@@ -719,7 +772,7 @@ async def run_batch(batch,dids,request_map,lease):
                 except RuntimeError as exc:
                     state['results'].append({'old':old,'status':'stopped','reason':str(exc)})
                     raise
-        await asyncio.to_thread(append_event,batch,'BATCH_COMPLETE',result='SUCCESS')
+        await asyncio.to_thread(append_event,batch,'BATCH_COMPLETE',result='PARTIAL_FAILURE' if any(x.get('status')=='failed' for x in state['results']) else 'SUCCESS',details='Manual recovery required for any activation failure')
     except Exception as exc:
         state['error']=str(exc)
         for req in await asyncio.to_thread(work.requests):

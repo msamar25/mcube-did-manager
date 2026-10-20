@@ -21,6 +21,7 @@ DEFAULTS={
 SETTINGS_HEADERS=['key','value']
 SETTING_LOG_HEADERS=['timestamp_utc','actor','key','old_value','new_value']
 REQUEST_HEADERS=['request_id','callid','callto','agent_number','agent_name','agent_email','current_did','first_call_utc','last_call_utc','call_count','status','recent_warning','last_reminder_utc','reminder_count','replacement_batch','replacement_new_did','completed_utc']
+# Legacy *_utc column names remain for existing Google Sheets compatibility; values are IST (+05:30).
 CALL_HEADERS=['callid','request_id','callto','starttime','endtime','dialstatus','direction','ingested_utc']
 NOTIFY_HEADERS=['timestamp_utc','request_id','kind','target','result','details']
 EMP_HEADERS=['agent_number','agent_name','email','updated_utc']
@@ -43,7 +44,7 @@ class Login(BaseModel):
 # Dependency injection avoids circular import with main.py
 class Workflows:
  def __init__(self, core): self.c=core
- def now(self): return datetime.now(timezone.utc).isoformat()
+ def now(self): return datetime.now(timezone(timedelta(hours=5,minutes=30))).isoformat(timespec='seconds')
  @staticmethod
  def phone(value):
   digits=''.join(c for c in str(value or '') if c.isdigit())
@@ -57,7 +58,7 @@ class Workflows:
   try:
    stamp=datetime.fromisoformat(str(value).strip().replace('Z','+00:00'))
    if stamp.tzinfo is None:stamp=stamp.replace(tzinfo=ZoneInfo('Asia/Kolkata'))
-   return stamp.astimezone(timezone.utc).isoformat()
+   return stamp.astimezone(timezone(timedelta(hours=5,minutes=30))).isoformat(timespec='seconds')
   except (ValueError,TypeError):return '' 
  def read(self,name,headers): return self.c.get_rows(name,headers)
  def append(self,name,headers,row): self.c.worksheet(self.c.sheet(),name,headers).append_row(row,value_input_option='RAW')
@@ -107,11 +108,11 @@ class Workflows:
    if self.phone(x.get('agent_number'))==self.phone(number):return x
   return {}
  async def fetch_employee_directory(self):
-  token=os.getenv('MCUBE_CONFIG_TOKEN','').strip()
-  if not token:raise HTTPException(503,'MCUBE_CONFIG_TOKEN not configured')
+  from .mcube_config_auth import fresh_token
   url=os.getenv('MCUBE_CONFIG_BASE_URL','https://config.mcube.com/Restmcube-api').rstrip('/')+'/emp-filter'
-  payload={'search_val':['2'],'search_type':'Roles','searchFilter':'','daterange':None,'Authorization':token}
+  payload={'search_val':['2'],'search_type':'Roles','searchFilter':'','daterange':None,'Authorization':''}
   async with httpx.AsyncClient(timeout=45) as client:
+   payload['Authorization']=await fresh_token(self.c,client)
    r=await client.post(url,json=payload,headers={'Content-Type':'application/json'})
    r.raise_for_status();data=r.json()
   # MCube config API is undocumented: normalize known wrappers, reject unrecognized response.
@@ -150,13 +151,13 @@ class Workflows:
   self.replace('Workflow_Sync',SYNC_HEADERS,[[r['key'],r['value']] for r in rows])
  async def fetch_calls(self):
   cfg=await asyncio.to_thread(self.settings)
-  token=os.getenv('MCUBE_CONFIG_TOKEN','').strip()
-  if not token:raise HTTPException(503,'MCUBE_CONFIG_TOKEN not configured')
+  from .mcube_config_auth import fresh_token
   url=os.getenv('MCUBE_CONFIG_BASE_URL','https://config.mcube.com/Restmcube-api').rstrip('/')+'/filter-inbound'
   limit=int(cfg['call_page_size']); collected=[]; offset=0; max_pages=100
   async with httpx.AsyncClient(timeout=45) as client:
    for _ in range(max_pages):
-    payload={'arr':{'clicktocalldid':str(cfg['request_did']),'duration_type':'total_duration'},'type':'today','filters':None,'tabtype':'','filter':'','month':'','offset':offset,'limit':limit,'Authorization':token}
+    payload={'arr':{'clicktocalldid':str(cfg['request_did']),'duration_type':'total_duration'},'type':'today','filters':None,'tabtype':'','filter':'','month':'','offset':offset,'limit':limit,'Authorization':''}
+    payload['Authorization']=await fresh_token(self.c,client)
     r=await client.post(url,json=payload,headers={'Content-Type':'application/json'})
     r.raise_for_status();data=r.json()
     def find_calls(node,depth=0):
@@ -204,7 +205,7 @@ class Workflows:
    if not first:continue
    req=pending.get(phone)
    if req:
-    req['last_call_utc']=max(str(req.get('last_call_utc') or ''),first);req['call_count']=int(req.get('call_count') or 0)+1
+    req['last_call_utc']=max((str(req.get('last_call_utc') or ''),first),key=lambda x: datetime.fromisoformat(x.replace('Z','+00:00')).timestamp() if x else 0);req['call_count']=int(req.get('call_count') or 0)+1
     self.update_request(req);repeated+=1
    else:
     emp=self.find_employee(phone);reqid=str(uuid.uuid4())
