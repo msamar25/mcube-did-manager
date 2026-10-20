@@ -170,7 +170,9 @@ class Workflows:
   from .mcube_config_auth import fresh_token
   url=os.getenv('MCUBE_CONFIG_BASE_URL','https://config.mcube.com/Restmcube-api').rstrip('/')+'/emp-filter'
   headers={'Accept':'application/json, text/plain, */*','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','Origin':'https://unext-acquisition.mcube.com','Referer':'https://unext-acquisition.mcube.com/'}
-  roles=('2','3','4','5')
+  # Include administrators (role 1) and every configured MCube role.
+  # Expand MCUBE_EMPLOYEE_ROLES if MCube introduces additional role IDs.
+  roles=tuple(dict.fromkeys(x.strip() for x in os.getenv('MCUBE_EMPLOYEE_ROLES','1,2,3,4,5').split(',') if x.strip()))
   role_counts={}; agents=[]
   async with httpx.AsyncClient(timeout=45) as client:
    for role in roles:
@@ -201,10 +203,33 @@ class Workflows:
    seen.add(number)
    result.append([number,str(a.get('agent_name') or a.get('emp_name') or a.get('name') or ''),str(a.get('email') or a.get('emp_email') or ''),now])
   if not result:raise RuntimeError('No valid employee mobile numbers; directory unchanged')
-  # Replace only after all four role responses have been validated.
-  self.replace('Employee_Directory',EMP_HEADERS,result)
+  # Compare against the existing directory before changing it. Do not discard
+  # additional roles or silently claim that unchanged records were missing.
+  before=self.employees()
+  before_by_phone={self.phone(x.get('agent_number')):x for x in before if self.phone(x.get('agent_number'))}
+  after_by_phone={row[0]:row for row in result}
+  added=sum(p not in before_by_phone for p in after_by_phone)
+  removed=sum(p not in after_by_phone for p in before_by_phone)
+  changed=sum(p in before_by_phone and
+              (str(before_by_phone[p].get('agent_name',''))!=row[1] or
+               str(before_by_phone[p].get('email',''))!=row[2])
+              for p,row in after_by_phone.items())
+  # Refresh only if membership or actual details differ; timestamp alone
+  # should not force rewriting the entire sheet on every scheduled run.
+  if added or removed or changed or len(before)!=len(result):
+   self.replace('Employee_Directory',EMP_HEADERS,result)
+   verified=self.employees()
+   verified_phones={self.phone(x.get('agent_number')) for x in verified if self.phone(x.get('agent_number'))}
+   if verified_phones!=set(after_by_phone) or len(verified)!=len(result):
+    raise RuntimeError('Employee directory verification failed after write')
+   updated=True
+  else:
+   updated=False
   self.set_sync('employee_sync',now)
-  return {'count':len(result),'fetched':len(agents),'skipped_missing_phone':skipped,'duplicate_phone':conflicts,'role_counts':role_counts,'last_sync':now}
+  return {'count':len(result),'fetched':len(agents),'skipped_missing_phone':skipped,
+          'duplicate_phone':conflicts,'role_counts':role_counts,'last_sync':now,
+          'previous_count':len(before),'added':added,'removed':removed,
+          'details_changed':changed,'sheet_updated':updated}
  def get_sync(self,key):
   for x in self.read('Workflow_Sync',SYNC_HEADERS):
    if x.get('key')==key:return str(x.get('value',''))
