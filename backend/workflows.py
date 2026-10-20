@@ -2,6 +2,7 @@
 All writes go through Sheets; intended for one Render worker, not a transactional multi-node database.
 """
 import os, json, uuid, hmac, asyncio, logging
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 import httpx
 from fastapi import HTTPException
@@ -24,7 +25,7 @@ SETTINGS_HEADERS=['key','value']
 SETTING_LOG_HEADERS=['timestamp_utc','actor','key','old_value','new_value']
 REQUEST_HEADERS=['request_id','callid','callto','agent_number','agent_name','agent_email','current_did','first_call_utc','last_call_utc','call_count','status','recent_warning','last_reminder_utc','reminder_count','replacement_batch','replacement_new_did','completed_utc']
 # Legacy *_utc column names remain for existing Google Sheets compatibility; values are IST (+05:30).
-CALL_HEADERS=['callid','request_id','callto','starttime','endtime','dialstatus','direction','ingested_utc']
+CALL_HEADERS=['callid','request_id','callto','starttime','endtime','dialstatus','direction','ingested_utc','current_did','request_did']
 NOTIFY_HEADERS=['timestamp_utc','request_id','kind','target','result','details']
 EMP_HEADERS=['agent_number','agent_name','email','updated_utc']
 SYNC_HEADERS=['key','value']
@@ -55,6 +56,17 @@ class Workflows:
   if len(digits)==13 and digits.startswith('091'):return digits[3:]
   return ''
  @staticmethod
+ def canonical_callid(value):
+  """Only exact digit strings are acceptable for deduplication.
+
+  Never round floats or scientific notation: original digits are unrecoverable.
+  """
+  if isinstance(value,bool) or value is None:return ''
+  if isinstance(value,int):return str(value) if value>=0 and len(str(value))<=15 else ''
+  if not isinstance(value,str):return ''
+  v=value.strip().lstrip("'")
+  return v if v.isascii() and v.isdecimal() else ''
+ @staticmethod
  def call_time(value):
   from zoneinfo import ZoneInfo
   try:
@@ -62,9 +74,53 @@ class Workflows:
    if stamp.tzinfo is None:stamp=stamp.replace(tzinfo=ZoneInfo('Asia/Kolkata'))
    return stamp.astimezone(timezone(timedelta(hours=5,minutes=30))).isoformat(timespec='seconds')
   except (ValueError,TypeError):return '' 
- def read(self,name,headers): return self.c.get_rows(name,headers)
- def append(self,name,headers,row): self.c.worksheet(self.c.sheet(),name,headers).append_row(row,value_input_option='RAW')
- def replace(self,name,headers,rows): self.c.replace_rows(name,headers,rows)
+ @contextmanager
+ def stage(self, label):
+  try:
+   yield
+  except HTTPException:
+   raise
+  except Exception as exc:
+   log.exception('Request sync stage failed: %s',label)
+   # Never include URLs, request payloads, credentials, or exception messages in HTTP responses.
+   raise RuntimeError(f'{label}: {type(exc).__name__}') from exc
+ def read(self,name,headers):
+  with self.stage('Google Sheets read '+name):
+   return self.c.get_rows(name,headers)
+ def append(self,name,headers,row):
+  with self.stage('Google Sheets append '+name):
+   ws=self.c.worksheet(self.c.sheet(),name,headers)
+   if name=='Call_Request_Events':
+    self.ensure_call_event_schema(ws)
+    row=[str(row[0]),*row[1:]]
+   ws.append_row(row,value_input_option='RAW')
+ def ensure_call_event_schema(self,ws):
+  """Append new columns without shifting or rewriting historical event data.
+
+  Force callid column to TEXT before inserting 20+ digit identifiers.
+  This cannot restore identifiers previously rounded by Google Sheets.
+  """
+  actual=[str(v).strip() for v in ws.row_values(1)]
+  if not actual:
+   ws.update(range_name='A1',values=[CALL_HEADERS],value_input_option='RAW')
+   actual=list(CALL_HEADERS)
+  if actual[:8]!=CALL_HEADERS[:8]:
+   raise RuntimeError('Call_Request_Events header mismatch; manual review required before writing')
+  if len(actual)>len(CALL_HEADERS) or actual[8:]!=CALL_HEADERS[8:len(actual)]:
+   raise RuntimeError('Unexpected Call_Request_Events columns; manual review required before writing')
+  if len(actual)<len(CALL_HEADERS):
+   if ws.col_count<len(CALL_HEADERS):ws.add_cols(len(CALL_HEADERS)-ws.col_count)
+   start=len(actual)+1
+   from gspread.utils import rowcol_to_a1
+   ws.update(range_name=f'{rowcol_to_a1(1,start)}:{rowcol_to_a1(1,len(CALL_HEADERS))}',values=[CALL_HEADERS[len(actual):]],value_input_option='RAW')
+  ws.spreadsheet.batch_update({'requests':[{'repeatCell':{
+   'range':{'sheetId':ws.id,'startColumnIndex':0,'endColumnIndex':1},
+   'cell':{'userEnteredFormat':{'numberFormat':{'type':'TEXT'}}},
+   'fields':'userEnteredFormat.numberFormat'}}]})
+
+ def replace(self,name,headers,rows):
+  with self.stage('Google Sheets update '+name):
+   self.c.replace_rows(name,headers,rows)
  def settings(self):
   raw=self.read('App_Settings',SETTINGS_HEADERS)
   cfg=dict(DEFAULTS)
@@ -110,44 +166,45 @@ class Workflows:
    if self.phone(x.get('agent_number'))==self.phone(number):return x
   return {}
  async def fetch_employee_directory(self):
+  """Fetch each role independently; never replace the directory on partial failure."""
   from .mcube_config_auth import fresh_token
   url=os.getenv('MCUBE_CONFIG_BASE_URL','https://config.mcube.com/Restmcube-api').rstrip('/')+'/emp-filter'
-  # Request all four employee roles; the former ['2'] filter omitted other accounts.
-  payload={'search_val':['2','3','4','5'],'search_type':'Roles','searchFilter':'','daterange':None,'Authorization':''}
+  headers={'Accept':'application/json, text/plain, */*','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','Origin':'https://unext-acquisition.mcube.com','Referer':'https://unext-acquisition.mcube.com/'}
+  roles=('2','3','4','5')
+  role_counts={}; agents=[]
   async with httpx.AsyncClient(timeout=45) as client:
-   payload['Authorization']=await fresh_token(self.c,client)
-   r=await client.post(url,content=json.dumps(payload,separators=(',',':')),headers={'Accept':'application/json, text/plain, */*','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','Origin':'https://unext-acquisition.mcube.com','Referer':'https://unext-acquisition.mcube.com/'})
-   r.raise_for_status();data=r.json()
-  # MCube installations return different wrappers. Accept only arrays with employee fields.
-  def find_arrays(node,depth=0):
-   if depth>6:return None
-   if isinstance(node,list):
-    if node and all(isinstance(x,dict) for x in node) and any(any(k in x for k in ('emp_phone','agent_number','emp_mobile','emp_alternative_phone')) for x in node):return node
-    for item in node:
-     out=find_arrays(item,depth+1)
-     if out is not None:return out
-   if isinstance(node,dict):
-    for key in ('employees','employee','agents','data','result','response','records','list'):
-     if key in node:
-      out=find_arrays(node[key],depth+1)
-      if out is not None:return out
-    for v in node.values():
-     out=find_arrays(v,depth+1)
-     if out is not None:return out
-   return None
-  agents=find_arrays(data)
-  if agents is None:raise RuntimeError('Unrecognized MCube employee response; existing directory preserved')
-  if not agents:raise RuntimeError('Empty MCube employee response; existing directory preserved')
-  now=self.now();result=[];seen=set()
+   for role in roles:
+    payload={'search_val':[role],'search_type':'Roles','daterange':None,'Authorization':await fresh_token(self.c,client)}
+    try:
+     r=await client.post(url,content=json.dumps(payload,separators=(',',':')),headers=headers)
+     r.raise_for_status()
+     data=r.json()
+    except (httpx.RequestError,httpx.HTTPStatusError,ValueError) as exc:
+     raise RuntimeError(f'MCube employee role {role} fetch failed: {type(exc).__name__}; directory unchanged') from exc
+    # The verified MCube response uses a top-level employees array.
+    if not isinstance(data,dict) or not isinstance(data.get('employees'),list):
+     raise RuntimeError(f'MCube employee role {role} response missing employees list; directory unchanged')
+    items=data['employees']
+    if any(not isinstance(item,dict) for item in items):
+     raise RuntimeError(f'MCube employee role {role} has invalid employee records; directory unchanged')
+    role_counts[role]=len(items)
+    agents.extend(items)
+  if not agents:
+   raise RuntimeError('MCube returned no employees for any role; existing directory preserved')
+  now=self.now();result=[];seen=set();skipped=0;conflicts=0
   for a in agents:
    number=self.phone(a.get('emp_phone') or a.get('agent_number') or a.get('emp_mobile') or a.get('emp_alternative_phone'))
-   if not number or number in seen:continue
+   if not number:
+    skipped+=1;continue
+   if number in seen:
+    conflicts+=1;continue
    seen.add(number)
    result.append([number,str(a.get('agent_name') or a.get('emp_name') or a.get('name') or ''),str(a.get('email') or a.get('emp_email') or ''),now])
-  if not result:raise RuntimeError('Employee directory empty; preserving previous snapshot')
+  if not result:raise RuntimeError('No valid employee mobile numbers; directory unchanged')
+  # Replace only after all four role responses have been validated.
   self.replace('Employee_Directory',EMP_HEADERS,result)
   self.set_sync('employee_sync',now)
-  return {'count':len(result),'last_sync':now}
+  return {'count':len(result),'fetched':len(agents),'skipped_missing_phone':skipped,'duplicate_phone':conflicts,'role_counts':role_counts,'last_sync':now}
  def get_sync(self,key):
   for x in self.read('Workflow_Sync',SYNC_HEADERS):
    if x.get('key')==key:return str(x.get('value',''))
@@ -164,9 +221,22 @@ class Workflows:
   async with httpx.AsyncClient(timeout=45) as client:
    for _ in range(max_pages):
     payload={'arr':{'clicktocalldid':str(cfg['request_did']),'duration_type':'total_duration'},'type':'today','filters':None,'tabtype':'','filter':'','month':'','offset':offset,'limit':limit,'Authorization':''}
-    payload['Authorization']=await fresh_token(self.c,client)
-    r=await client.post(url,content=json.dumps(payload,separators=(',',':')),headers={'Accept':'application/json, text/plain, */*','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','Origin':'https://unext-acquisition.mcube.com','Referer':'https://unext-acquisition.mcube.com/'})
-    r.raise_for_status();data=r.json()
+    try:
+     payload['Authorization']=await fresh_token(self.c,client)
+    except HTTPException: raise
+    except Exception as exc:
+     log.exception('MCube config login connection failed')
+     raise RuntimeError(f'MCube login connection: {type(exc).__name__}') from exc
+    try:
+     r=await client.post(url,content=json.dumps(payload,separators=(',',':')),headers={'Accept':'application/json, text/plain, */*','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','Origin':'https://unext-acquisition.mcube.com','Referer':'https://unext-acquisition.mcube.com/'})
+    except httpx.RequestError as exc:
+     log.exception('MCube inbound request network failure')
+     raise RuntimeError(f'MCube inbound API connection: {type(exc).__name__}') from exc
+    try:
+     r.raise_for_status();data=r.json()
+    except (httpx.HTTPStatusError,ValueError) as exc:
+     log.exception('MCube inbound API response failed (HTTP %s)',r.status_code)
+     raise RuntimeError(f'MCube inbound API response: HTTP {r.status_code}') from exc
     def find_calls(node,depth=0):
      if depth>5:return None
      if isinstance(node,list):
@@ -208,7 +278,8 @@ class Workflows:
    if number in agents:ambiguous.add(number)
    else:agents[number]=row
   for number in ambiguous:agents.pop(number,None)
-  previous={str(x['callid']) for x in self.read('Call_Request_Events',CALL_HEADERS)}
+  previous={self.canonical_callid(x.get('callid')) for x in self.read('Call_Request_Events',CALL_HEADERS)}
+  previous.discard('')
   pending={str(x['agent_number']):x for x in self.requests() if x.get('status') in ('pending','review_required','approved','processing')}
   recent=self.recent_agents(cfg['recent_replacement_days'])
   created=0;repeated=0;ignored=0
@@ -219,7 +290,7 @@ class Workflows:
    status=str(call.get('dialstatus','')).strip().lower()
    if direction != 'inbound':skipped['not_inbound']+=1;continue
    if status != 'cancel':skipped['not_cancelled']+=1;continue
-   callid=str(call.get('callid','')).strip();phone=self.phone(call.get('callto'))
+   callid=self.canonical_callid(call.get('callid'));phone=self.phone(call.get('callto'))
    if not callid or callid in previous:skipped['missing_or_seen_callid']+=1;continue
    if phone not in employee_map:skipped['employee_not_found']+=1;continue
    if phone not in agents:skipped['no_unique_active_did']+=1;continue
@@ -238,7 +309,7 @@ class Workflows:
     req=dict.fromkeys(REQUEST_HEADERS,'')
     req.update(request_id=reqid,callid=callid,callto=phone,agent_number=phone,agent_name=agent.get('agent_name','') or emp.get('agent_name',''),agent_email=emp.get('email',''),current_did=str(agent.get('did_no','')),first_call_utc=first,last_call_utc=first,call_count=1,status='review_required' if warning and cfg['require_recent_review'] else 'pending',recent_warning='yes' if warning else 'no',reminder_count=0)
     self.update_request(req);pending[phone]=req;created+=1
-   self.append('Call_Request_Events',CALL_HEADERS,[callid,req['request_id'],phone,first,end,'cancel','inbound',self.now()]);previous.add(callid)
+   self.append('Call_Request_Events',CALL_HEADERS,[callid,req['request_id'],phone,first,end,'cancel','inbound',self.now(),str(agent.get('did_no','')),str(cfg['request_did'])]);previous.add(callid)
    if not req.get('replacement_batch') and int(req.get('call_count') or 0)==1 and str(req.get('callid'))==callid:
     if cfg['notify_on_queue']:
      await self.outbound_notification(req,'queued',cfg)

@@ -173,7 +173,15 @@ def append_event(batch, event, old='', new='', agent='', name='', result='', det
     ws.append_row([datetime.now(IST).isoformat(timespec="seconds"),batch,event,old,new,agent,name,result,str(details)[:1000]], value_input_option='RAW')
 
 def get_rows(name, headers):
-    return _quota_call(lambda: worksheet(sheet(),name,headers).get_all_records())
+    import requests
+    for attempt in range(3):
+        try:
+            return _quota_call(lambda: worksheet(sheet(),name,headers).get_all_records(numericise_ignore=['all'] if name=='Call_Request_Events' else []))
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            if attempt == 2:
+                log.warning('Google Sheets read %s failed after 3 attempts: %s', name, type(exc).__name__)
+                raise
+            time.sleep(min(4, 2 ** attempt))
 
 # Durable fail-closed recovery gate. Google Sheets is a journal, NOT a lock.
 # A crash between MCube calls leaves an unfinished batch, blocking new replacements.
@@ -382,7 +390,7 @@ async def sync_requests():
         try:return await work.sync_calls()
         except HTTPException:raise
         except Exception as exc:
-            log.exception('Call sync failed');raise HTTPException(502,f'Call sync failed: {type(exc).__name__}')
+            log.exception('Call sync failed');raise HTTPException(502,f'Call sync failed: {str(exc) if isinstance(exc,RuntimeError) else type(exc).__name__}')
 
 @app.post('/api/employees/sync')
 async def sync_employees(role=Depends(admin_only)):
@@ -390,7 +398,7 @@ async def sync_employees(role=Depends(admin_only)):
     async with lock:
         try:return await work.fetch_employee_directory()
         except Exception as exc:
-            log.exception('Employee sync failed');raise HTTPException(502,f'Employee sync failed: {type(exc).__name__}')
+            log.exception('Employee sync failed');raise HTTPException(502,f'Employee sync failed: {str(exc)[:240]}')
 
 async def maintenance_auth(authorization: str | None = Header(None)):
     token=(authorization or '').removeprefix('Bearer ').strip()
