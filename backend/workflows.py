@@ -9,12 +9,14 @@ from pydantic import BaseModel, Field
 
 log=logging.getLogger('mcube.workflows')
 DEFAULTS={
- 'request_did':'8071845706', 'recent_replacement_days':3, 'sync_mode':'login',
+ 'request_did':'8071439545', 'recent_replacement_days':3, 'sync_mode':'login',
  'call_page_size':30, 'employee_refresh_hours':24, 'request_sync_lookback_minutes':30,
  'reminder_enabled':False, 'reminder_first_minutes':0, 'reminder_interval_minutes':60,
  'reminder_escalation_minutes':120, 'reminder_max_attempts':3,
  'notify_on_queue':False, 'notify_on_completion':False,
  'first_contact_number':'', 'second_contact_number':'', 'outbound_caller_number':'',
+ 'level1_exenumber':'', 'level1_custnumber':'', 'level2_exenumber':'', 'level2_custnumber':'',
+ 'agent_notification_custnumber':'', 'notify_level2_on_queue':False,
  'email_on_queue':False, 'email_on_completion':False, 'require_recent_review':True,
  'admin_email':'', 'mail_from':'', 'mail_provider':'brevo'
 }
@@ -82,12 +84,12 @@ class Workflows:
   if invalid: raise HTTPException(422,f'Unknown settings: {sorted(invalid)}')
   new={**old,**values}
   if not str(new['request_did']).isdigit() or len(str(new['request_did']))!=10: raise HTTPException(422,'Request DID must contain 10 digits')
-  for k in ['first_contact_number','second_contact_number','outbound_caller_number']:
+  for k in ['first_contact_number','second_contact_number','outbound_caller_number','level1_exenumber','level1_custnumber','level2_exenumber','level2_custnumber','agent_notification_custnumber']:
    if str(new[k]) and (not str(new[k]).isdigit() or len(str(new[k]))!=10): raise HTTPException(422,f'{k} must be a 10-digit number')
-  for k in ['call_page_size','recent_replacement_days','reminder_interval_minutes','reminder_escalation_minutes','reminder_max_attempts','employee_refresh_hours']:
+  for k in ['call_page_size','recent_replacement_days','reminder_interval_minutes','reminder_escalation_minutes','reminder_max_attempts','employee_refresh_hours','request_sync_lookback_minutes']:
    if not isinstance(new[k],int) or not 1<=new[k]<=10000: raise HTTPException(422,f'Invalid {k}')
-  if new['reminder_enabled'] and not new['first_contact_number']: raise HTTPException(422,'First reminder contact is required')
-  if new['reminder_enabled'] and not new['outbound_caller_number']: raise HTTPException(422,'Outbound caller number is required')
+  if new['reminder_enabled'] and not (new['level1_custnumber'] or new['first_contact_number']): raise HTTPException(422,'Level 1 recipient is required')
+  if new['reminder_enabled'] and not (new['level1_exenumber'] or new['outbound_caller_number']): raise HTTPException(422,'Level 1 exenumber is required')
   changes=[(k,old[k],new[k]) for k in old if old[k]!=new[k]]
   if not changes:return {'ok':True,'version':self.settings_version(),'changed':0}
   self.replace('App_Settings',SETTINGS_HEADERS,[[k,json.dumps(v)] for k,v in new.items()])
@@ -179,7 +181,8 @@ class Workflows:
        if found is not None:return found
      return None
     page=data.get('clicktocall') if isinstance(data,dict) else None
-    if page is None:raise RuntimeError('Unrecognized inbound response schema; no requests written')
+    if not isinstance(page,list):raise RuntimeError('Unrecognized inbound response schema; no requests written')
+    if any(not isinstance(item,dict) for item in page):raise RuntimeError('Invalid MCube call row; no requests written')
     collected.extend(page)
     if len(page)<limit:break
     offset+=limit
@@ -214,8 +217,9 @@ class Workflows:
    if str(call.get('direction','')).strip().lower()!='inbound' or str(call.get('dialstatus','')).strip().lower()!='cancel':continue
    callid=str(call.get('callid','')).strip();phone=self.phone(call.get('callto'))
    if not callid or callid in previous or phone not in agents:continue
-   # The clicktocalldid is already applied server-side; reject any mismatching field in a returned row.
-   if self.phone(call.get('clicktocalldid'))!=self.phone(cfg['request_did']):continue
+   # The request DID is enforced by the server-side query. Some MCube rows omit this field;
+   # reject explicit mismatches but accept absent fields.
+   if call.get('clicktocalldid') and self.phone(call.get('clicktocalldid'))!=self.phone(cfg['request_did']):continue
    agent=agents[phone];emp=employee_map[phone];first=self.call_time(call.get('starttime'));end=self.call_time(call.get('endtime'))
    if not first:continue
    req=pending.get(phone)
@@ -232,6 +236,8 @@ class Workflows:
    if not req.get('replacement_batch') and int(req.get('call_count') or 0)==1 and str(req.get('callid'))==callid:
     if cfg['notify_on_queue']:
      await self.outbound_notification(req,'queued',cfg)
+     if cfg.get('notify_level2_on_queue'):
+      await self.outbound_notification(req,'queued_level2',cfg)
     if cfg['email_on_queue']:
      await self.send_email(req,'queued',cfg)
   self.set_sync('calls_sync',self.now())
@@ -242,14 +248,25 @@ class Workflows:
    if row.get('event')!='REASSIGNMENT_COMPLETE':continue
    try: when=datetime.fromisoformat(str(row.get('time_utc','')).replace('Z','+00:00'))
    except Exception:continue
+   if when.tzinfo is None:when=when.replace(tzinfo=timezone.utc)
    if when>=cutoff:recent[self.phone(row.get('agent_number'))]=row
   return recent
  async def outbound_notification(self,req,kind,cfg=None,target=None):
   cfg=cfg or self.settings()
-  exenumber=str(cfg.get('outbound_caller_number','')).strip()
-  custnumber=str(target or cfg.get('first_contact_number','')).strip()
-  if kind=='completed':custnumber=str(req.get('agent_number',''))
-  if not exenumber or not custnumber:return {'status':'skipped','reason':'Calling numbers not configured'}
+  # MCube bridges exenumber first, then dials custnumber. Keep agent's
+  # verified MCube number as exenumber for agent notifications.
+  level2 = kind == 'queued_level2' or (kind == 'reminder' and bool(target) and target in (cfg.get('second_contact_number'),cfg.get('level2_custnumber')))
+  if kind == 'completed':
+   exenumber=self.phone(req.get('agent_number'))
+   custnumber=self.phone(cfg.get('agent_notification_custnumber') or cfg.get('request_did'))
+  elif level2:
+   exenumber=self.phone(cfg.get('level2_exenumber') or cfg.get('outbound_caller_number'))
+   custnumber=self.phone(cfg.get('level2_custnumber') or cfg.get('second_contact_number'))
+  else:
+   exenumber=self.phone(cfg.get('level1_exenumber') or cfg.get('outbound_caller_number'))
+   custnumber=self.phone(cfg.get('level1_custnumber') or cfg.get('first_contact_number'))
+  if not exenumber or not custnumber:
+   return {'status':'skipped','reason':'Valid exenumber and custnumber required for '+kind}
   token=os.getenv('MCUBE_BEARER_TOKEN','').removeprefix('Bearer ').strip()
   if not token:return {'status':'skipped','reason':'MCube token missing'}
   payload={'HTTP_AUTHORIZATION':token,'exenumber':exenumber,'custnumber':custnumber,'consent':'Yes'}
@@ -257,11 +274,11 @@ class Workflows:
    async with httpx.AsyncClient(timeout=35) as client:
     r=await client.post(self.c.MCUBE+'/outbound-calls',json=payload,headers={'Content-Type':'application/json'})
     r.raise_for_status();response=r.json()
-   status='submitted' if isinstance(response,dict) and str(response.get('status','')).lower()=='succ' and response.get('callid') else 'rejected'
+   status='submitted' if isinstance(response,dict) and (str(response.get('status','')).lower() in ('succ','success','200','true') or response.get('callid')) else 'rejected'
    detail=json.dumps({'callid':str(response.get('callid','')),'msg':str(response.get('msg',''))[:120]}) if isinstance(response,dict) else 'Unexpected response'
   except Exception as exc:
    status='uncertain';detail=type(exc).__name__
-  self.append('Notification_Logs',NOTIFY_HEADERS,[self.now(),req['request_id'],f'call_{kind}',custnumber,status,detail])
+  self.append('Notification_Logs',NOTIFY_HEADERS,[self.now(),req['request_id'],f'call_{kind}',custnumber,status,'exenumber='+exenumber+'; '+detail])
   return {'status':status,'detail':detail}
  async def send_email(self,req,kind,cfg=None):
   cfg=cfg or self.settings();to=str(req.get('agent_email','')).strip()
@@ -294,7 +311,7 @@ class Workflows:
     try:
      if (now-datetime.fromisoformat(str(last).replace('Z','+00:00'))).total_seconds()/60<cfg['reminder_interval_minutes']:continue
     except Exception:pass
-   target=cfg['second_contact_number'] if elapsed>=cfg['reminder_escalation_minutes'] and cfg['second_contact_number'] else cfg['first_contact_number']
+   target=(cfg.get('second_contact_number') or cfg.get('level2_custnumber')) if elapsed>=cfg['reminder_escalation_minutes'] and (cfg.get('second_contact_number') or cfg.get('level2_custnumber')) else (cfg.get('first_contact_number') or cfg.get('level1_custnumber'))
    # Journal intent first to avoid duplicate calls if process crashes mid-request.
    req['reminder_count']=count+1;req['last_reminder_utc']=self.now()
    await asyncio.to_thread(self.update_request,req)
