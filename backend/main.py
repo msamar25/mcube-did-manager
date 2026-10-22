@@ -759,7 +759,15 @@ async def employee_email_lookup():
     Never guess from names. Return diagnostics so an empty email column is actionable.
     """
     try:
-        rows=await asyncio.to_thread(get_rows,'Employee_Directory',work.EMP_HEADERS)
+        # Read raw values to tolerate blank/duplicate header cells and malformed Sheets metadata.
+        # Never infer email from agent name; agent_number is the sole join key.
+        def read_directory_raw():
+            ws=worksheet(sheet(),'Employee_Directory',work.EMP_HEADERS)
+            values=_quota_call(lambda: ws.get_all_values())
+            if not values:return []
+            headers=[str(v).strip().lower().replace(' ','_') for v in values[0]]
+            return [{h:(row[i] if i<len(row) else '') for i,h in enumerate(headers) if h} for row in values[1:] if any(str(v).strip() for v in row)]
+        rows=await asyncio.to_thread(read_directory_raw)
         emails={};ambiguous=set();with_phone=0;with_email=0
         def pick(row,*keys):
             normalized={str(k).strip().lower().replace(' ','_'):v for k,v in row.items()}
@@ -779,8 +787,10 @@ async def employee_email_lookup():
         return {'by_phone':emails,'matched':len(emails),'ambiguous':len(ambiguous),
                 'directory_rows':len(rows),'rows_with_phone':with_phone,'rows_with_email':with_email}
     except Exception as exc:
-        log.exception('Employee email lookup failed')
-        raise HTTPException(503,'Unable to load employee email directory') from exc
+        log.exception('Employee email lookup failed: %s',type(exc).__name__)
+        # A non-sensitive diagnostic code makes failures actionable in Render logs.
+        if isinstance(exc,HTTPException):raise
+        raise HTTPException(503,f'Employee directory read failed ({type(exc).__name__}). Check Render logs and Google Sheet permissions.') from exc
 
 @app.get('/api/agents/{agent_number}/profile',dependencies=[Depends(auth)])
 async def agent_profile(agent_number:str):

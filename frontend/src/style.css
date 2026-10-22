@@ -354,3 +354,34 @@ input[type=checkbox],input[type=radio]{accent-color:#ff6600}
 @keyframes story-checkdraw{0%,20%{stroke-dashoffset:60}55%,100%{stroke-dashoffset:0}}
 @media(max-width:880px){.support-film{width:min(100%,340px)}.auth-wordmark .unext-logo{width:72px!important;height:34px!important}.auth-wordmark span{height:34px;line-height:34px!important;font-size:22px!important}}
 @media(prefers-reduced-motion:reduce){.auth-spark,.story-person,.story-agent-arm,.story-student-arm,.story-support-arm,.story-phase,.story-draw,.story-check{animation:none!important}.story-phase{opacity:0}.story-call{opacity:1}}
+
+/* v59 compact 5-row desktop workspace, responsive 18/82 panels */
+@media(min-width:900px){.app .did-workspace,.app .request-workspace{grid-template-columns:minmax(190px,18fr) minmax(0,82fr)!important;gap:14px!important}.app .did-workspace{height:calc(100dvh - 178px)!important;min-height:465px!important}.app .did-workspace-toolbar{padding:7px 12px!important}.app .did-workspace-filters{padding:4px 12px!important;gap:7px!important}.app .did-workspace-selection{padding:5px 9px!important;margin:0 12px 4px!important}.app .did-table-viewport{flex:1;min-height:0;overflow-y:auto}.app .did-table-viewport table{width:100%;min-width:0!important}.app .did-table-viewport td,.app .did-table-viewport th{height:39px!important;padding:5px 7px!important}.app .did-workspace-pagination{padding:5px 10px!important}.app .stats-unified-card{padding:13px 12px}.app .stats-unified-list .did-stat-card{padding:12px 4px!important;min-height:0!important}}
+.stats-unified-list .did-stat-card{position:relative;padding-left:47px!important}.stats-unified-list .did-stat-card:before{position:absolute;left:2px;top:21px;width:32px;height:32px;display:grid;place-items:center;background:#fff1e8;color:#f60;border-radius:10px;font-size:17px;content:'◈'}.stats-unified-list .did-stat-card:nth-child(2):before{content:'♙';background:#e8faf5;color:#009b79}.stats-unified-list .did-stat-card:nth-child(3):before{content:'▦';background:#fff5df;color:#d88a0d}.stats-unified-list .did-stat-card:nth-child(4):before{content:'✓';background:#eef0ff;color:#6052a8}
+.app .request-metrics .metric{position:relative;padding-left:45px!important}.app .request-metrics .metric:before{content:'◷';position:absolute;left:0;top:12px;width:30px;height:30px;display:grid;place-items:center;background:#fff1e8;color:#f60;border-radius:9px;font-size:18px}.app .request-metrics .metric:nth-child(2):before{content:'↻'}.app .request-metrics .metric:nth-child(3):before{content:'✓'}.app .request-metrics .metric:nth-child(4):before{content:'!'}
+.app .request-queue-column .grid-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.app .request-queue-column .grid-tools .grid-search{flex:1;min-width:190px}.app .request-queue-column .grid-tools .request-bulk-top{white-space:nowrap;font-size:12px;padding:9px}.picker-section-title{font-size:12px;margin:14px 0 7px;color:#34415b}.app .modal.single-modal,.app .modal.batch-modal{height:auto!important;max-height:min(85dvh,750px)!important;overflow-y:auto!important;padding:22px!important}.app .modal .detail{padding:12px!important;margin:9px 0!important}.app .modal .subtitle{margin:5px 0 12px!important}.app .modal .date-field{margin:8px 0!important}.app .modal .safety-note{margin:10px 0!important}.app .modal .plan-scroll{max-height:300px;overflow:auto}.app .modal .modal-actions{margin-top:12px!important}
+@media(max-width:899px){.app .did-workspace,.app .request-workspace{grid-template-columns:1fr!important}.app .did-workspace{height:auto!important}.app .did-workspace-main{height:70dvh!important}.app .stats-unified-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.app .request-queue-column .grid-tools{flex-wrap:wrap}}
+
+/* v60: robust eye placement, independent of legacy global button positioning */
+.auth-layout .auth-field .auth-input-wrap{position:relative!important;display:block!important;width:100%!important;isolation:isolate}
+.auth-layout .auth-field .auth-input-wrap input{display:block!important;box-sizing:border-box!important;width:100%!important;padding-left:49px!important;padding-right:62px!important}
+.auth-layout .auth-field .auth-input-wrap>svg{position:absolute!important;left:16px!important;top:50%!important;transform:translateY(-50%)!important;z-index:2}
+.auth-layout .auth-field .auth-input-wrap>button.auth-eye{position:absolute!important;inset:auto 9px auto auto!important;right:9px!important;top:50%!important;transform:translateY(-50%)!important;margin:0!important;min-width:38px!important;max-width:38px!important;min-height:38px!important;max-height:38px!important;box-sizing:border-box!important;line-height:1!important;z-index:5!important}
+/* v60: six-scene white outline film with three persistent, distinct people */
+.support-film{width:min(100%,600px);max-width:100%;margin:0 0 14px}
+.support-film svg{display:block;width:100%;height:auto;overflow:visible}
+.film-character{transform-box:fill-box;transform-origin:center bottom;animation:film-breathe 3.2s ease-in-out infinite}
+.film-counsellor{animation-delay:-.9s}.film-support{animation-delay:-1.8s}
+.film-student-hand,.film-agent-hand,.film-support-hand{transform-box:fill-box;transform-origin:left top;animation:film-wave 2.7s ease-in-out infinite}
+.film-agent-hand{animation-delay:-.7s}.film-support-hand{animation-delay:-1.3s}
+.film-scene{opacity:0;animation:film-sequence 24s linear infinite}
+.film-enquiry{animation-delay:0s}.film-call{animation-delay:-20s}.film-apply{animation-delay:-16s}.film-issue{animation-delay:-12s}.film-ticket{animation-delay:-8s}.film-resolved{animation-delay:-4s}
+.film-link{animation:film-dash 1.4s linear infinite}.film-moving-ticket{animation:film-ticket-move 4s ease-in-out infinite}.film-check{stroke-dasharray:70;stroke-dashoffset:70;animation:film-draw-check 4s ease-in-out infinite}
+@keyframes film-sequence{0%,3%{opacity:0}7%,15%{opacity:1}18%,100%{opacity:0}}
+@keyframes film-breathe{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+@keyframes film-wave{0%,100%{transform:rotate(0)}50%{transform:rotate(8deg)}}
+@keyframes film-dash{to{stroke-dashoffset:-30}}
+@keyframes film-ticket-move{0%,20%{transform:translateX(-22px);opacity:.5}65%,100%{transform:translateX(30px);opacity:1}}
+@keyframes film-draw-check{0%,20%{stroke-dashoffset:70}65%,100%{stroke-dashoffset:0}}
+@media(max-width:880px){.support-film{width:min(100%,380px)}}
+@media(prefers-reduced-motion:reduce){.film-character,.film-student-hand,.film-agent-hand,.film-support-hand,.film-scene,.film-link,.film-moving-ticket,.film-check{animation:none!important}.film-scene{opacity:0}.film-enquiry{opacity:1}}
