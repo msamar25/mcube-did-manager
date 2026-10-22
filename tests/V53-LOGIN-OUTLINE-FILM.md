@@ -1,0 +1,1 @@
+v53: Replaced the four icon journey with a looping white-line SVG scene featuring a counsellor and student, cycling through calling, enrolment, issue reporting and support resolution. No video download or extra dependencies. Respects reduced-motion preference.

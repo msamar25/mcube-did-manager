@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: mcube-did-manager
+    runtime: python
+    plan: free
+    buildCommand: "cd frontend && npm install && npm run build && cd ../backend && pip install -r requirements.txt"
+    startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_TOKEN
+        sync: false
+      - key: MCUBE_BEARER_TOKEN
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: OPERATOR_TOKEN
+        sync: false
+      - key: MCUBE_CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: MCUBE_CONFIG_TOKEN
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_SENDER_EMAIL
+        sync: false
+      - key: BREVO_SENDER_NAME
+        value: MCube DID Manager
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PIN_HASH
+        sync: false
+      - key: OPERATOR_USERS_JSON
+        sync: false
+      - key: OPERATOR_EMAIL
+        sync: false
+      - key: OPERATOR_PIN_HASH
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: MAINTENANCE_TOKEN
+        generateValue: true

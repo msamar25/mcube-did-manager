@@ -1,0 +1,1 @@
+Employee sync fetches roles 2, 3, 4 and 5 separately, validates all responses, merges by normalized employee phone, and writes the Employee_Directory sheet once. Existing rows are preserved if a role request fails. Run POST /api/employees/sync after deployment. No live Google Sheets data was modified by this package.\n

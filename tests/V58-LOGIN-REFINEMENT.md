@@ -1,0 +1,1 @@
+v58: corrected PIN visibility alignment and orange accent, logo baseline, gentle star motion, three-character white-outline SVG journey with counsellor, student, support specialist, staged call/enrolment/issue/ticket/resolution. No React dependency.

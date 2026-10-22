@@ -1,0 +1,1 @@
+v57: Replaced profile dropdown with an always-visible compact account card in the header. Displays avatar, online status, role, signed-in email and icon-only sign-out button with tooltip. Mobile responsive. Existing session and audit behavior unchanged.
