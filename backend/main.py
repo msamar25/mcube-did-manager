@@ -409,27 +409,33 @@ async def maintenance_auth(authorization: str | None = Header(None)):
 
 @app.post('/api/maintenance/tick')
 async def maintenance_tick(authorized=Depends(maintenance_auth)):
-    """Optional GitHub Actions hourly tick. Failures do not suppress other tasks."""
+    """External cron trigger; each task is gated by Google Sheets configuration."""
+    from datetime import timedelta
     if lock.locked():raise HTTPException(409,'Another operation is in progress')
     result={}
     async with lock:
-        try:
-            cfg=await asyncio.to_thread(work.settings)
-            stamp=await asyncio.to_thread(work.get_sync,'employee_sync')
-            from datetime import timedelta
-            due=not stamp
-            if stamp:
-                try:due=datetime.now(timezone.utc)-datetime.fromisoformat(stamp.replace('Z','+00:00'))>=timedelta(hours=int(cfg['employee_refresh_hours']))
-                except Exception:due=True
-            if due:
-                try:result['employees']=await work.fetch_employee_directory()
-                except Exception as exc:result['employees_error']=type(exc).__name__
+        cfg=await asyncio.to_thread(work.settings)
+        async def due(key,minutes):
+            stamp=await asyncio.to_thread(work.get_sync,key)
+            if not stamp:return True
+            try:return datetime.now(timezone.utc)-datetime.fromisoformat(stamp.replace('Z','+00:00'))>=timedelta(minutes=int(minutes))
+            except Exception:return True
+        if await due('employee_sync',cfg.get('auto_employee_minutes',1440)):
+            try:result['employees']=await work.fetch_employee_directory()
+            except Exception as exc:log.exception('Scheduled employee sync failed');result['employees_error']=type(exc).__name__
+        if await due('calls_sync',cfg.get('auto_calls_minutes',15)):
             try:result['calls']=await work.sync_calls()
-            except Exception as exc:result['calls_error']=type(exc).__name__
-            try:result['reminders']=await work.due_reminders()
-            except Exception as exc:result['reminders_error']=type(exc).__name__
-        except Exception as exc:
-            log.exception('Maintenance failed');raise HTTPException(502,type(exc).__name__)
+            except Exception as exc:log.exception('Scheduled calls sync failed');result['calls_error']=type(exc).__name__
+        if await due('inventory_auto_sync',cfg.get('auto_inventory_minutes',60)):
+            try:
+                async with httpx.AsyncClient(timeout=35) as client:
+                    lists=await fetch_lists(client)
+                await snapshot(lists)
+                await asyncio.to_thread(work.set_sync,'inventory_auto_sync',work.now())
+                result['inventory']='updated'
+            except Exception as exc:log.exception('Scheduled inventory sync failed');result['inventory_error']=type(exc).__name__
+        try:result['reminders']=await work.due_reminders()
+        except Exception as exc:log.exception('Scheduled reminders failed');result['reminders_error']=type(exc).__name__
     return result
 
 @app.post('/api/reminders/run',dependencies=[Depends(auth)])
@@ -653,6 +659,81 @@ async def batch_status(): return dict(state)
 async def logs():
     try: return {'items':(await asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS))[-500:]}
     except Exception: raise HTTPException(503,'Cannot read audit log')
+
+@app.get('/api/insights',dependencies=[Depends(auth)])
+async def insights():
+    """Read-only QC metrics. Actual replacement time is completed_utc, never MCube lastcall."""
+    from collections import Counter, defaultdict
+    from datetime import datetime, timezone
+    from statistics import median
+    from .workflows import EMP_HEADERS, REQUEST_HEADERS, CALL_HEADERS
+
+    def dt(value):
+        try:
+            raw=str(value or '').strip()
+            if not raw or raw.startswith('0000-'): return None
+            result=datetime.fromisoformat(raw.replace('Z','+00:00'))
+            return result.replace(tzinfo=timezone.utc) if result.tzinfo is None else result
+        except (ValueError,TypeError): return None
+
+    def hours(start,end):
+        a,b=dt(start),dt(end)
+        return round((b-a).total_seconds()/3600,2) if a and b and b>=a else None
+
+    def gather():
+        employees=get_rows('Employee_Directory',EMP_HEADERS)
+        requests=get_rows('Pending_Requests',REQUEST_HEADERS)
+        logs=get_rows('Change_Logs',LOG_HEADERS)
+        calls=get_rows('Call_Request_Events',CALL_HEADERS)
+        lookup={str(e.get('agent_number','')).strip():e for e in employees}
+        leaders=defaultdict(lambda:{'requests':0,'repeat_calls':0,'completed':0,'pending':0,'review_required':0,'employees':set(),'turnaround_hours':[],'repeat_employee_count':0})
+        by_agent=defaultdict(lambda:{'requests':0,'calls':0,'completed':0,'turnaround_hours':[],'request_dates':[],'last_replacement_utc':None,'last_request_utc':None,'last_call_utc':None})
+        statuses=Counter();by_day=Counter();turnarounds=[];now=datetime.now(timezone.utc)
+        for r in requests:
+            phone=str(r.get('agent_number') or r.get('callto') or '').strip()
+            employee=lookup.get(phone,{})
+            manager=str(employee.get('role5') or 'Unassigned').strip() or 'Unassigned'
+            tl=str(employee.get('role4') or 'Unassigned').strip() or 'Unassigned'
+            count=int(str(r.get('call_count') or '1')) if str(r.get('call_count') or '1').isdigit() else 1
+            count=max(1,count)
+            status=str(r.get('status') or 'unknown').strip().lower()
+            statuses[status]+=1
+            team=leaders[(manager,tl)]
+            team['requests']+=1;team['repeat_calls']+=count-1
+            team['completed']+=int(status=='completed')
+            team['pending']+=int(status in ('pending','approved','processing'))
+            team['review_required']+=int(status=='review_required')
+            team['employees'].add(phone)
+            agent=by_agent[phone]
+            agent['requests']+=1;agent['calls']+=count;agent['completed']+=int(status=='completed')
+            first=dt(r.get('first_call_utc'));last=dt(r.get('last_call_utc'))
+            completed=dt(r.get('completed_utc')) if status=='completed' else None
+            if first:
+                agent['request_dates'].append(first)
+                by_day[first.date().isoformat()]+=1
+                if not agent['last_request_utc'] or first>agent['last_request_utc']:agent['last_request_utc']=first
+            if last and (not agent['last_call_utc'] or last>agent['last_call_utc']):agent['last_call_utc']=last
+            if completed:
+                if not agent['last_replacement_utc'] or completed>agent['last_replacement_utc']:agent['last_replacement_utc']=completed
+                duration=hours(r.get('first_call_utc'),r.get('completed_utc'))
+                if duration is not None:
+                    agent['turnaround_hours'].append(duration);team['turnaround_hours'].append(duration);turnarounds.append(duration)
+        teams=[]
+        for (manager,tl),value in leaders.items():
+            members=[a for phone,a in by_agent.items() if phone in value['employees']]
+            teams.append({'manager':manager,'team_lead':tl,'requests':value['requests'],'repeat_calls':value['repeat_calls'],'completed':value['completed'],'pending':value['pending'],'review_required':value['review_required'],'unique_employees':len(value['employees']),'repeat_employee_count':sum(a['requests']>1 for a in members),'average_turnaround_hours':round(sum(value['turnaround_hours'])/len(value['turnaround_hours']),1) if value['turnaround_hours'] else None,'completion_rate_pct':round(100*value['completed']/value['requests'],1) if value['requests'] else 0,'requests_per_employee':round(value['requests']/len(value['employees']),2) if value['employees'] else 0})
+        teams.sort(key=lambda x:(-x['requests'],x['manager'],x['team_lead']))
+        agents=[]
+        for phone,value in by_agent.items():
+            dates=sorted(value['request_dates']);intervals=[round((b-a).total_seconds()/86400,1) for a,b in zip(dates,dates[1:]) if b>a]
+            employee=lookup.get(phone,{})
+            last_rep=value['last_replacement_utc'];last_req=value['last_request_utc'];last_call=value['last_call_utc']
+            agents.append({'agent_number':phone,'agent_name':employee.get('agent_name',''),'team_lead':employee.get('role4',''),'manager':employee.get('role5',''),'requests':value['requests'],'calls':value['calls'],'completed':value['completed'],'repeat_requests':max(0,value['requests']-1),'median_days_between_requests':round(median(intervals),1) if intervals else None,'average_turnaround_hours':round(sum(value['turnaround_hours'])/len(value['turnaround_hours']),1) if value['turnaround_hours'] else None,'last_replacement_utc':last_rep.isoformat() if last_rep else None,'last_request_utc':last_req.isoformat() if last_req else None,'last_call_utc':last_call.isoformat() if last_call else None,'days_since_last_replacement':round((now-last_rep).total_seconds()/86400,1) if last_rep and now>=last_rep else None,'days_last_replacement_to_next_request':next((round((d-last_rep).total_seconds()/86400,1) for d in dates if last_rep and d>last_rep),None) if last_rep else None})
+        agents.sort(key=lambda a:(-a['requests'],-a['calls']))
+        return {'summary':{'employees':len(employees),'requests':len(requests),'call_events':len(calls),'replacement_completions':sum(str(x.get('event','')).upper()=='REASSIGNMENT_COMPLETE' for x in logs),'audit_events':len(logs),'repeat_requests':sum(a['requests']>1 for a in agents),'repeated_calls':sum(max(0,a['calls']-a['requests']) for a in agents),'average_turnaround_hours':round(sum(turnarounds)/len(turnarounds),1) if turnarounds else None,'median_turnaround_hours':round(median(turnarounds),1) if turnarounds else None,'turnaround_sample_size':len(turnarounds)},'statuses':dict(statuses),'by_day':[{'date':d,'requests':n} for d,n in sorted(by_day.items())],'teams':teams,'agents':agents,'recent_operations':list(reversed(logs[-100:])),'methodology':{'replacement_time':'Pending_Requests.completed_utc for completed requests; verified MCube change logs are counted separately','request_time':'Pending_Requests.first_call_utc','repeat_request':'More than one distinct request row for the same employee; repeated calls in a single request are counted separately','manager_team':'Current role5 / role4 from Employee_Directory, not historical hierarchy','last_call':'Pending_Requests.last_call_utc; not a replacement timestamp','turnaround':'First qualifying call to verified completion; excludes missing/invalid timestamps'}}
+    try:return await asyncio.to_thread(gather)
+    except Exception as exc:
+        log.exception('Insights read failed');raise HTTPException(503,'Unable to read report data from Google Sheets') from exc
 
 @app.post('/api/reassign',dependencies=[Depends(auth)])
 async def reassign(request:BatchRequest,role=Depends(auth)):

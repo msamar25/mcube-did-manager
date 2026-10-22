@@ -12,6 +12,7 @@ log=logging.getLogger('mcube.workflows')
 DEFAULTS={
  'request_did':'8071439545', 'recent_replacement_days':3, 'sync_mode':'login',
  'call_page_size':30, 'employee_refresh_hours':24, 'request_sync_lookback_minutes':30,
+ 'auto_inventory_minutes':60, 'auto_calls_minutes':15, 'auto_employee_minutes':1440,
  'reminder_enabled':False, 'reminder_first_minutes':0, 'reminder_interval_minutes':60,
  'reminder_escalation_minutes':120, 'reminder_max_attempts':3,
  'notify_on_queue':False, 'notify_on_completion':False,
@@ -27,7 +28,7 @@ REQUEST_HEADERS=['request_id','callid','callto','agent_number','agent_name','age
 # Legacy *_utc column names remain for existing Google Sheets compatibility; values are IST (+05:30).
 CALL_HEADERS=['callid','request_id','callto','starttime','endtime','dialstatus','direction','ingested_utc','current_did','request_did']
 NOTIFY_HEADERS=['timestamp_utc','request_id','kind','target','result','details']
-EMP_HEADERS=['agent_number','agent_name','email','updated_utc']
+EMP_HEADERS=['agent_number','agent_name','email','updated_utc','agent_id','role','status','role3','role4','role5']
 SYNC_HEADERS=['key','value']
 
 class SettingsUpdate(BaseModel):
@@ -142,7 +143,7 @@ class Workflows:
   if not str(new['request_did']).isdigit() or len(str(new['request_did']))!=10: raise HTTPException(422,'Request DID must contain 10 digits')
   for k in ['first_contact_number','second_contact_number','outbound_caller_number','level1_exenumber','level1_custnumber','level2_exenumber','level2_custnumber','agent_notification_custnumber']:
    if str(new[k]) and (not str(new[k]).isdigit() or len(str(new[k]))!=10): raise HTTPException(422,f'{k} must be a 10-digit number')
-  for k in ['call_page_size','recent_replacement_days','reminder_interval_minutes','reminder_escalation_minutes','reminder_max_attempts','employee_refresh_hours','request_sync_lookback_minutes']:
+  for k in ['call_page_size','recent_replacement_days','reminder_interval_minutes','reminder_escalation_minutes','reminder_max_attempts','employee_refresh_hours','request_sync_lookback_minutes','auto_inventory_minutes','auto_calls_minutes','auto_employee_minutes']:
    if not isinstance(new[k],int) or not 1<=new[k]<=10000: raise HTTPException(422,f'Invalid {k}')
   if new['reminder_enabled'] and not (new['level1_custnumber'] or new['first_contact_number']): raise HTTPException(422,'Level 1 recipient is required')
   if new['reminder_enabled'] and not (new['level1_exenumber'] or new['outbound_caller_number']): raise HTTPException(422,'Level 1 exenumber is required')
@@ -201,7 +202,9 @@ class Workflows:
    if number in seen:
     conflicts+=1;continue
    seen.add(number)
-   result.append([number,str(a.get('agent_name') or a.get('emp_name') or a.get('name') or ''),str(a.get('email') or a.get('emp_email') or ''),now])
+   result.append([number,str(a.get('agent_name') or a.get('emp_name') or a.get('name') or ''),str(a.get('email') or a.get('emp_email') or ''),now,
+                  str(a.get('agent_id') or ''),str(a.get('role') or ''),str(a.get('status') or ''),
+                  str(a.get('role3') or ''),str(a.get('role4') or ''),str(a.get('role5') or '')])
   if not result:raise RuntimeError('No valid employee mobile numbers; directory unchanged')
   # Compare against the existing directory before changing it. Do not discard
   # additional roles or silently claim that unchanged records were missing.
@@ -212,7 +215,8 @@ class Workflows:
   removed=sum(p not in after_by_phone for p in before_by_phone)
   changed=sum(p in before_by_phone and
               (str(before_by_phone[p].get('agent_name',''))!=row[1] or
-               str(before_by_phone[p].get('email',''))!=row[2])
+               str(before_by_phone[p].get('email',''))!=row[2] or
+               any(str(before_by_phone[p].get(field,''))!=row[idx] for idx,field in enumerate(EMP_HEADERS[4:],4)))
               for p,row in after_by_phone.items())
   # Refresh only if membership or actual details differ; timestamp alone
   # should not force rewriting the entire sheet on every scheduled run.
