@@ -167,6 +167,7 @@ def invalidate_snapshots(*names):
 LOG_HEADERS = ['time_utc','batch_id','event','old_did','new_did','agent_number','agent_name','result','details']
 FIFO_HEADERS = ['fifo_position','did_no','operator','available','snapshot_utc']
 DID_HEADERS = ['did_no','agent_name','agent_no','operator']
+AGENT_HISTORY_HEADERS = ['event_id','completed_at_ist','batch_id','agent_number','agent_name','old_did','new_did','result','manager_at_sync','team_lead_at_sync','source']
 
 def append_event(batch, event, old='', new='', agent='', name='', result='', details=''):
     ws = worksheet(sheet(), 'Change_Logs', LOG_HEADERS)
@@ -434,6 +435,13 @@ async def maintenance_tick(authorized=Depends(maintenance_auth)):
                 await asyncio.to_thread(work.set_sync,'inventory_auto_sync',work.now())
                 result['inventory']='updated'
             except Exception as exc:log.exception('Scheduled inventory sync failed');result['inventory_error']=type(exc).__name__
+        if await due('agent_history_sync',60):
+            try:
+                result['agent_history']=await asyncio.to_thread(sync_agent_replacement_history)
+                await asyncio.to_thread(work.set_sync,'agent_history_sync',work.now())
+            except Exception as exc:
+                log.exception('Scheduled agent history sync failed')
+                result['agent_history_error']=type(exc).__name__
         try:result['reminders']=await work.due_reminders()
         except Exception as exc:log.exception('Scheduled reminders failed');result['reminders_error']=type(exc).__name__
     return result
@@ -660,6 +668,66 @@ async def logs():
     try: return {'items':(await asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS))[-500:]}
     except Exception: raise HTTPException(503,'Cannot read audit log')
 
+def sync_agent_replacement_history():
+    """Idempotent reconciliation from the authoritative Change_Logs journal.
+    Preserves historical rows and never treats last call time as replacement time.
+    """
+    logs=get_rows('Change_Logs',LOG_HEADERS)
+    ws=worksheet(sheet(),'Agent_Replacement_History',AGENT_HISTORY_HEADERS)
+    existing=_quota_call(lambda: ws.get_all_records(numericise_ignore=['all']))
+    known={str(r.get('event_id','')) for r in existing}
+    employees=get_rows('Employee_Directory',work.EMP_HEADERS)
+    by_phone={work.phone(str(e.get('agent_number',''))):e for e in employees}
+    pending=[]
+    for index,event in enumerate(logs,2):
+        if str(event.get('event','')).upper()!='REASSIGNMENT_COMPLETE' or str(event.get('result','')).upper()!='SUCCESS':continue
+        # Index is stable for append-only Change_Logs; includes batch to guard collisions.
+        eid=f"{event.get('batch_id','')}:{index}"
+        if eid in known:continue
+        phone=work.phone(str(event.get('agent_number','')))
+        emp=by_phone.get(phone,{})
+        pending.append([eid,str(event.get('time_utc','')),str(event.get('batch_id','')),phone,str(event.get('agent_name','')),str(event.get('old_did','')),str(event.get('new_did','')),'SUCCESS',str(emp.get('role5','')),str(emp.get('role4','')),'Change_Logs'])
+        known.add(eid)
+    if pending:
+        _quota_call(lambda: ws.append_rows(pending,value_input_option='RAW'))
+    return {'synced':len(pending),'total':len(known),'source':'Change_Logs'}
+
+@app.post('/api/agent-history/sync',dependencies=[Depends(admin_only)])
+async def sync_agent_history_endpoint():
+    try:return await asyncio.to_thread(sync_agent_replacement_history)
+    except Exception as exc:
+        log.exception('Agent history synchronization failed')
+        raise HTTPException(503,'Unable to synchronize agent replacement history') from exc
+
+@app.get('/api/agents/{agent_number}/profile',dependencies=[Depends(auth)])
+async def agent_profile(agent_number:str):
+    phone=work.phone(agent_number)
+    if not phone or len(phone)<8:raise HTTPException(400,'Invalid agent number')
+    try:
+        employees,requests,logs,history=await asyncio.gather(
+            asyncio.to_thread(get_rows,'Employee_Directory',work.EMP_HEADERS),
+            asyncio.to_thread(work.requests),
+            asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS),
+            asyncio.to_thread(get_rows,'Agent_Replacement_History',AGENT_HISTORY_HEADERS))
+        employee=next((e for e in employees if work.phone(str(e.get('agent_number','')))==phone),{})
+        related_requests=[r for r in requests if work.phone(str(r.get('agent_number','')))==phone]
+        related_history=[r for r in history if work.phone(str(r.get('agent_number','')))==phone]
+        # Include authoritative successful events even if the materialized history sheet has not synced yet.
+        known={(str(r.get('batch_id','')),str(r.get('old_did','')),str(r.get('new_did',''))) for r in related_history}
+        for e in logs:
+            if str(e.get('event','')).upper()!='REASSIGNMENT_COMPLETE' or str(e.get('result','')).upper()!='SUCCESS' or work.phone(str(e.get('agent_number','')))!=phone:continue
+            key=(str(e.get('batch_id','')),str(e.get('old_did','')),str(e.get('new_did','')))
+            if key not in known:
+                related_history.append({'completed_at_ist':e.get('time_utc',''),'batch_id':key[0],'old_did':key[1],'new_did':key[2],'agent_number':phone,'agent_name':e.get('agent_name',''),'result':'SUCCESS','source':'Change_Logs (not yet synced)'})
+                known.add(key)
+        related_history.sort(key=lambda r:str(r.get('completed_at_ist','')),reverse=True)
+        related_requests.sort(key=lambda r:str(r.get('first_call_utc','')),reverse=True)
+        return {'agent_number':phone,'employee':employee,'requests':related_requests,'replacements':related_history,'replacement_count':len(related_history),'request_count':len(related_requests)}
+    except HTTPException:raise
+    except Exception as exc:
+        log.exception('Agent profile load failed')
+        raise HTTPException(503,'Unable to read agent profile from Google Sheets') from exc
+
 @app.get('/api/insights',dependencies=[Depends(auth)])
 async def insights():
     """Read-only QC metrics. Actual replacement time is completed_utc, never MCube lastcall."""
@@ -853,6 +921,8 @@ async def run_batch(batch,dids,request_map,lease):
                     await asyncio.to_thread(snapshot_sync,verified)
                     order=[d for d in order if d!=new]
                     await asyncio.to_thread(append_event,batch,'REASSIGNMENT_COMPLETE',old,new,agent,name,'SUCCESS')
+                    try: await asyncio.to_thread(sync_agent_replacement_history)
+                    except Exception: log.exception('History sheet sync deferred; Change_Logs retains verified completion')
                     if old in request_map:
                         req=next((r for r in await asyncio.to_thread(work.requests) if r['request_id']==request_map[old]),None)
                         if req:
