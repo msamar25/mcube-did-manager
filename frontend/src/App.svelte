@@ -11,7 +11,7 @@
   return new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true}).format(date)+' IST';
  }
  import { onMount } from 'svelte';
- import { UserRound, Settings2, GraduationCap, BookOpen, MonitorPlay, LayoutDashboard, ChartNoAxesColumn, FilePlus2, FileText, Search, RefreshCw, Download, X, LogOut, ArrowRight, ArrowLeft, Eye, EyeOff, LockKeyhole, Mail, ShieldCheck, AlertCircle, CheckCircle2 } from 'lucide-svelte';
+ import { UserRound, Settings2, GraduationCap, LayoutDashboard, ChartNoAxesColumn, FilePlus2, FileText, Search, RefreshCw, Download, X, LogOut, ArrowRight, ArrowLeft, Eye, EyeOff, LockKeyhole, Mail, ShieldCheck, AlertCircle, CheckCircle2 } from 'lucide-svelte';
  let mcubeUsername=$state(''), mcubePassword=$state(''), mcubeCredentialConfigured=$state(false), mcubeCredentialBusy=$state(false), mcubeCredentialMessage=$state('');
  let role=$state('operator'), settings=$state({}), settingsVersion=$state(''), requests=$state([]), notifications=$state([]), saving=$state(false), requestBusy=$state(false), chosenRequests=$state([]), reviewReason=$state('Reviewed previous replacement'), employeeSyncBusy=$state(false);
  let reviewTarget=$state(null), reviewDecision=$state(null), requestConfirm=$state(false); let token=$state(sessionStorage.getItem('did_token')||''); let sessionExpiredMessage=$state(''); let loginEmail=$state(''); let loginPin=$state(''); let loginOtp=$state(''); let challengeId=$state(''); let loginBusy=$state(false); let loginError=$state(''); let otpExpiresAt=$state(0); let otpNow=$state(Date.now()); let showLoginPin=$state(false);
@@ -159,15 +159,61 @@
   <aside class="auth-hero" aria-label="UNext SupportHub welcome">
    <div class="auth-hero-pattern" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
    <div class="auth-hero-content">
-    <div class="learning-scene" aria-hidden="true"><span class="learn-orbit learn-a"><GraduationCap size={32}/></span><span class="learn-orbit learn-b"><BookOpen size={28}/></span><span class="learn-orbit learn-c"><MonitorPlay size={28}/></span><div class="learn-center"><GraduationCap size={60}/></div></div>
-    <h1>Welcome to<br/>SupportHub</h1>
-    <p>Manage DID assignments, review replacement requests and keep your calling operations running smoothly.</p>
+    <div class="auth-simple-icons auth-journey-header" aria-hidden="true"><span class="auth-spark">✳</span></div>
+    <div class="support-film" role="img" aria-label="Animated white-line story: a counsellor calls a student, the student enrols, encounters an issue, and the support team resolves it">
+      <svg viewBox="0 0 520 248" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <g class="film-ground" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" opacity=".38"><path d="M30 215 H490"/><path d="M72 226 H166 M354 226 H450"/></g>
+        <!-- Counsellor at a desk, with headset and computer -->
+        <g class="film-counsellor" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="114" cy="83" r="23"/><path d="M90 81 Q89 48 114 48 Q140 48 138 82 M88 82 V100 Q88 107 96 107 M140 82 V100 Q140 107 132 107 M132 107 Q129 116 119 116"/>
+          <path d="M77 174 V148 Q77 119 106 119 H124 Q153 119 153 148 V174 M102 121 L114 138 L126 121"/>
+          <path d="M57 173 H176 M69 173 L76 215 M164 173 L158 215"/>
+          <rect x="145" y="145" width="54" height="34" rx="4"/><path d="M172 179 V187 M158 187 H186"/>
+        </g>
+        <!-- Student as a person, not an icon -->
+        <g class="film-student" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="383" cy="84" r="23"/><path d="M360 77 Q362 54 385 58 Q406 60 407 79 M372 92 Q382 101 393 91"/>
+          <path d="M345 174 V151 Q345 121 374 121 H394 Q422 121 422 151 V174 M367 123 L383 140 L399 123"/>
+          <path d="M333 174 H437 M349 174 L355 215 M420 174 L414 215"/>
+          <path d="M384 142 V164"/>
+        </g>
+        <!-- Scene 1: a call connects the two people -->
+        <g class="film-scene film-call" fill="none" stroke="white" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round">
+          <path class="film-signal" d="M218 94 Q260 54 302 94" stroke-dasharray="7 9"/>
+          <path d="M245 100 Q245 117 260 124 Q275 117 275 100"/>
+          <path d="M250 100 L253 94 L259 99 M269 100 L267 94 L261 99"/>
+        </g>
+        <!-- Scene 2: student's enrolment confirmation -->
+        <g class="film-scene film-enrol" fill="none" stroke="white" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="226" y="68" width="69" height="91" rx="7"/><path d="M239 89 H281 M239 103 H272 M239 117 H264"/>
+          <path class="film-tick" d="M245 138 L254 147 L276 126"/>
+        </g>
+        <!-- Scene 3: the student reports an issue -->
+        <g class="film-scene film-issue" fill="none" stroke="white" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M227 75 H294 Q301 75 301 83 V129 Q301 137 293 137 H268 L252 151 V137 H227 Q219 137 219 129 V83 Q219 75 227 75 Z"/>
+          <path d="M260 90 V112 M260 123 V124" stroke-width="4"/>
+        </g>
+        <!-- Scene 4: support ticket gets resolved -->
+        <g class="film-scene film-resolve" fill="none" stroke="white" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="223" y="70" width="74" height="80" rx="9"/><path d="M238 85 H281 M238 96 H267"/>
+          <circle cx="260" cy="121" r="17"/><path class="film-tick" d="M250 121 L257 128 L271 113"/>
+        </g>
+        <g class="film-labels" fill="white" text-anchor="middle" font-size="14" font-family="Arial,sans-serif" font-weight="600">
+          <text class="film-scene film-call" x="260" y="198">Counsellor connects</text>
+          <text class="film-scene film-enrol" x="260" y="198">Student enrols</text>
+          <text class="film-scene film-issue" x="260" y="198">Issue reported</text>
+          <text class="film-scene film-resolve" x="260" y="198">Support resolves</text>
+        </g>
+      </svg>
+    </div>
+    <h1>Hello<br/>UNext! <span class="auth-wave" aria-hidden="true">👋</span></h1>
+    <p>One place to support your team, manage calling operations, resolve requests and turn insights into better experiences.</p>
    </div>
    <div class="auth-hero-footer">© {new Date().getFullYear()} UNext SupportHub. All rights reserved.</div>
   </aside>
   <section class="auth-form-side">
    <div class="auth-form-wrap">
-    <div class="auth-wordmark"><img class="unext-logo" src="https://store.u-next.com/cdn/shop/files/UNEXT_Updated_LOGO.jpg?v=1765438884&amp;width=500" alt="UNext logo"/><span>UNext <b>SupportHub</b></span></div>
+    <div class="auth-wordmark"><img class="unext-logo" src="https://store.u-next.com/cdn/shop/files/UNEXT_Updated_LOGO.jpg?v=1765438884&amp;width=500" alt="UNext"/><span>SupportHub</span></div>
     <form class="login-card auth-card" onsubmit={e=>{e.preventDefault();challengeId?verifyOtp():signin()}}>
      <div class="auth-form-heading">
       {#if challengeId}
@@ -194,7 +240,7 @@
   </section>
  </main>
 {:else}
- <div class="app"><header class="topbar"><div class="brand"><img class="unext-logo" src="https://store.u-next.com/cdn/shop/files/UNEXT_Updated_LOGO.jpg?v=1765438884&amp;width=500" alt="UNext logo"/><span>UNext <b>SupportHub</b></span></div><nav>{#each [{name:'Dashboard',icon:LayoutDashboard},{name:'Analytics',icon:ChartNoAxesColumn},{name:'Request',icon:FilePlus2},{name:'Report',icon:FileText},...(role==='admin'?[{name:'Settings',icon:Settings2}]:[])] as n}<button class:current={tab===n.name} disabled={batchBusy} onclick={()=>openTab(n.name)}><n.icon size={18}/>{n.name}</button>{/each}</nav><div class="profile-wrap"><button class="profile-trigger" disabled={batchBusy} onclick={()=>profileOpen=!profileOpen} aria-label="Open account menu"><span class="profile-avatar"><UserRound size={18}/></span><span class="profile-text">{role==='admin'?'Administrator':'Operator'}</span><span>⌄</span></button>{#if profileOpen}<div class="profile-menu"><strong>UNext SupportHub</strong><small>{role==='admin'?'Administrator access':'Operator access'}</small>{#if role==='admin'}<button onclick={()=>{profileOpen=false;openTab('Settings')}}><Settings2 size={17}/> Settings</button>{/if}<button onclick={()=>{profileOpen=false;signout()}}><LogOut size={15}/> Sign out</button></div>{/if}</div></header>
+ <div class="app"><header class="topbar"><div class="brand"><img class="unext-logo" src="https://store.u-next.com/cdn/shop/files/UNEXT_Updated_LOGO.jpg?v=1765438884&amp;width=500" alt="UNext"/><span>SupportHub</span></div><nav>{#each [{name:'Dashboard',icon:LayoutDashboard},{name:'Analytics',icon:ChartNoAxesColumn},{name:'Request',icon:FilePlus2},{name:'Report',icon:FileText},...(role==='admin'?[{name:'Settings',icon:Settings2}]:[])] as n}<button class:current={tab===n.name} disabled={batchBusy} onclick={()=>openTab(n.name)}><n.icon size={18}/>{n.name}</button>{/each}</nav><div class="profile-wrap"><button class="profile-trigger" disabled={batchBusy} onclick={()=>profileOpen=!profileOpen} aria-label="Open account menu"><span class="profile-avatar"><UserRound size={18}/></span><span class="profile-text">{role==='admin'?'Administrator':'Operator'}</span><span>⌄</span></button>{#if profileOpen}<div class="profile-menu"><strong>UNext SupportHub</strong><small>{role==='admin'?'Administrator access':'Operator access'}</small>{#if role==='admin'}<button onclick={()=>{profileOpen=false;openTab('Settings')}}><Settings2 size={17}/> Settings</button>{/if}<button onclick={()=>{profileOpen=false;signout()}}><LogOut size={15}/> Sign out</button></div>{/if}</div></header>
  <main class="container"><div class="workspace-heading"><div><span class="workspace-eyebrow">DID / OPERATIONS CENTER</span><h1>{tab==='Request'?'Replacement requests':tab==='Dashboard'?'DID inventory':tab==='Analytics'?'Operations analytics':tab==='Report'?'Quality & performance reports':'Workspace settings'}</h1><p>{tab==='Request'?'Review inbound requests and perform controlled DID replacements.':tab==='Dashboard'?'Live inventory, assignment health and controlled replacement operations.':tab==='Analytics'?'Explore trends, turnaround times and repeat behavior.':tab==='Report'?'Team performance and exportable QC intelligence.':'Manage integrations, sync schedules and application rules.'}</p></div><div class="workspace-sync-status" title="Last successful DID inventory synchronization"><span class="live-dot"></span><span>Last sync: <strong>{inventoryStatus?.last_sync_utc?formatIST(inventoryStatus.last_sync_utc):'Not yet synced'}</strong></span></div></div>
  {#if error}<div class="message error"><AlertCircle size={17}/>{error}<button onclick={()=>error=''}><X size={16}/></button></div>{/if}
  {#if notice}<div class="workspace-toast" role="status" aria-live="polite"><CheckCircle2 size={19}/><span>{notice}</span><button aria-label="Dismiss notification" onclick={()=>notice=''}><X size={17}/></button></div>{/if}
