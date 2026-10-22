@@ -5,7 +5,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 from pathlib import Path
 from typing import Literal
 import httpx
-from fastapi import FastAPI, Depends, Header, HTTPException
+from fastapi import FastAPI, Depends, Header, HTTPException, Request
 from .workflows import Workflows, SettingsUpdate, QueueBatch, Review
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -107,6 +107,7 @@ async def login_verify(payload: LoginVerify):
     actual=hashlib.sha256((payload.challenge_id+payload.otp).encode()).hexdigest()
     if not hmac.compare_digest(actual,record['digest']):raise HTTPException(401,'Invalid OTP')
     OTP_CHALLENGES.pop(payload.challenge_id,None)
+    await asyncio.to_thread(_safe_access_log, record['email'], record['role'], 'LOGIN_SUCCESS', '/api/auth/verify', 'SUCCESS')
     return {'token':_sign({'kind':'session','role':record['role'],'email':record['email'],'exp':int(time.time()+8*3600)}),'role':record['role'],'expires_in':28800}
 
 async def auth(authorization: str | None = Header(None)):
@@ -177,12 +178,47 @@ def get_rows(name, headers):
     import requests
     for attempt in range(3):
         try:
-            return _quota_call(lambda: worksheet(sheet(),name,headers).get_all_records(numericise_ignore=['all'] if name=='Call_Request_Events' else []))
+            return _quota_call(lambda: worksheet(sheet(),name,headers).get_all_records(numericise_ignore=['all'] if name in ('Call_Request_Events','Employee_Directory','Active_DIDs','Inactive_DIDs','FIFO_Pool') else []))
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             if attempt == 2:
                 log.warning('Google Sheets read %s failed after 3 attempts: %s', name, type(exc).__name__)
                 raise
             time.sleep(min(4, 2 ** attempt))
+
+# Identity audit: do not store passwords, PINs, OTPs or bearer tokens.
+ACCESS_HEADERS=['time_ist','email','role','action','endpoint','result']
+def _safe_access_log(email, role, action, endpoint, result):
+    try:
+        worksheet(sheet(),'User_Activity_Logs',ACCESS_HEADERS).append_row(
+            [datetime.now(IST).isoformat(timespec='seconds'),email,role,action,endpoint,result],value_input_option='RAW')
+    except Exception:
+        log.exception('User activity audit unavailable: %s %s', action, endpoint)
+
+@app.middleware('http')
+async def identity_audit_middleware(request: Request, call_next):
+    path=request.url.path
+    if not path.startswith('/api/'):
+        return await call_next(request)
+    # Only audit authenticated mutations. OTP verification is logged separately.
+    token=(request.headers.get('authorization') or '').removeprefix('Bearer ').strip()
+    identity=None
+    if token:
+        try: identity=_verify(token)
+        except HTTPException: pass
+    try:
+        response=await call_next(request)
+    except Exception:
+        if identity and request.method in ('POST','PUT','PATCH','DELETE'):
+            await asyncio.to_thread(_safe_access_log,identity.get('email',''),identity.get('role',''),request.method,path,'ERROR')
+        raise
+    if identity and request.method in ('POST','PUT','PATCH','DELETE') and path!='/api/auth/verify':
+        await asyncio.to_thread(_safe_access_log,identity.get('email',''),identity.get('role',''),request.method,path,str(response.status_code))
+    return response
+
+@app.post('/api/auth/logout')
+async def logout(role=Depends(auth)):
+    # Middleware records the identity and logout action. The client then discards its token.
+    return {'ok':True}
 
 # Durable fail-closed recovery gate. Google Sheets is a journal, NOT a lock.
 # A crash between MCube calls leaves an unfinished batch, blocking new replacements.
@@ -318,7 +354,9 @@ import sys
 work=Workflows(sys.modules[__name__])
 
 @app.get('/api/me',dependencies=[Depends(auth)])
-async def me(role=Depends(auth)):return {'role':role}
+async def me(authorization: str | None = Header(None)):
+    identity=_verify((authorization or '').removeprefix('Bearer ').strip())
+    return {'role':identity['role'],'email':identity.get('email','')}
 
 @app.get('/api/settings',dependencies=[Depends(auth)])
 async def get_settings(role=Depends(auth)):
