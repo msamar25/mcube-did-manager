@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 log = logging.getLogger('mcube')
-app = FastAPI(title='MCube DID Manager', docs_url=None if os.getenv('APP_ENV') == 'production' else '/docs')
+app = FastAPI(title='UNext SupportHub', docs_url=None if os.getenv('APP_ENV') == 'production' else '/docs')
 BASE = Path(__file__).resolve().parent.parent / 'frontend' / 'dist'
 MCUBE = os.getenv('MCUBE_BASE_URL', 'https://api.mcube.com/Restmcube-api').rstrip('/')
 from .operation_lock import OperationLock
@@ -88,7 +88,7 @@ async def login_start(payload: LoginStart):
     OTP_CHALLENGES[challenge]={'email':email,'role':role,'digest':hashlib.sha256((challenge+otp).encode()).hexdigest(),'expires':now+300,'attempts':0}
     try:
         from .brevo import send_brevo
-        await send_brevo(email,'MCube DID Manager login code',f'Your one-time login code is {otp}. It expires in 5 minutes. Do not share this code.')
+        await send_brevo(email,'UNext SupportHub login code',f'Your one-time login code is {otp}. It expires in 5 minutes. Do not share this code.')
     except Exception:
         OTP_CHALLENGES.pop(challenge,None)
         raise HTTPException(503,'Unable to send OTP. Check Brevo configuration.')
@@ -630,6 +630,21 @@ async def dids():
             raise HTTPException(503, 'Inventory backend configuration error; inspect Render traceback') from exc
         raise HTTPException(503,'Unable to read Google Sheets snapshot') from exc
 
+# Admin-only inventory reset. Immutable audit, requests, settings, employees and history are NEVER deleted.
+class ResetInventory(BaseModel):
+    confirmation: Literal['CLEAR_INVENTORY_SNAPSHOTS_ONLY']
+
+@app.post('/api/admin/inventory/clear')
+async def clear_inventory(body:ResetInventory,role=Depends(admin_only)):
+    if lock.locked(): raise HTTPException(409,'Operation already running')
+    async with lock:
+        await require_reconciled()
+        await asyncio.to_thread(append_event,'ADMIN','INVENTORY_RESET_REQUESTED',result='AUDIT',details='Snapshots only; replacement journal retained')
+        for name,headers in [('Active_DIDs',DID_HEADERS),('Inactive_DIDs',DID_HEADERS),('DID_Pool_FIFO',FIFO_HEADERS),('Sync_Status',['last_sync_utc','active','inactive','pool'])]:
+            await asyncio.to_thread(replace_rows,name,headers,[])
+        await asyncio.to_thread(append_event,'ADMIN','INVENTORY_RESET_COMPLETE',result='SUCCESS',details='Ready for explicit provider re-sync')
+        return {'ok':True,'message':'Inventory snapshots cleared. Audit and operational records preserved.'}
+
 @app.get('/api/inventory/status',dependencies=[Depends(auth)])
 async def inventory_status():
     """Read-only first-run check. Empty snapshots are not interpreted as live zero DIDs."""
@@ -701,21 +716,30 @@ async def sync_agent_history_endpoint():
 
 @app.get('/api/employees/lookup',dependencies=[Depends(auth)])
 async def employee_email_lookup():
-    """Read-only email index from the Google Sheets employee directory.
-    Match by normalized agent number; ambiguous duplicate numbers are intentionally omitted.
+    """Live read of Employee_Directory, matching only canonical 10-digit agent mobiles.
+
+    Never guess from names. Return diagnostics so an empty email column is actionable.
     """
     try:
         rows=await asyncio.to_thread(get_rows,'Employee_Directory',work.EMP_HEADERS)
-        emails={}
-        ambiguous=set()
+        emails={};ambiguous=set();with_phone=0;with_email=0
+        def pick(row,*keys):
+            normalized={str(k).strip().lower().replace(' ','_'):v for k,v in row.items()}
+            for key in keys:
+                value=normalized.get(key)
+                if value is not None and str(value).strip():return str(value).strip()
+            return ''
         for row in rows:
-            number=work.phone(str(row.get('agent_number','')))
-            email=str(row.get('email','')).strip()
+            number=work.phone(pick(row,'agent_number','emp_phone','employee_phone','mobile','phone','agent_no','phone_number'))
+            email=pick(row,'email','email_id','email_address','emp_email','official_email','work_email')
+            if number:with_phone+=1
+            if email and '@' in email:with_email+=1
             if not number or not email or '@' not in email:continue
             if number in emails and emails[number].casefold()!=email.casefold():ambiguous.add(number)
             else:emails[number]=email
         for number in ambiguous:emails.pop(number,None)
-        return {'by_phone':emails,'matched':len(emails),'ambiguous':len(ambiguous)}
+        return {'by_phone':emails,'matched':len(emails),'ambiguous':len(ambiguous),
+                'directory_rows':len(rows),'rows_with_phone':with_phone,'rows_with_email':with_email}
     except Exception as exc:
         log.exception('Employee email lookup failed')
         raise HTTPException(503,'Unable to load employee email directory') from exc
@@ -830,7 +854,7 @@ async def insights():
         log.exception('Insights read failed');raise HTTPException(503,'Unable to read report data from Google Sheets') from exc
 
 @app.post('/api/reassign',dependencies=[Depends(auth)])
-async def reassign(request:BatchRequest,role=Depends(auth)):
+async def reassign(request:BatchRequest,role=Depends(admin_only)):
     recent=await asyncio.to_thread(work.recent_agents,(await asyncio.to_thread(work.settings))['recent_replacement_days'])
     live=await asyncio.to_thread(get_rows,'Active_DIDs',DID_HEADERS)
     by_did={str(r.get('did_no')):r for r in live}
