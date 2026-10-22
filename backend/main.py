@@ -394,7 +394,7 @@ async def sync_requests():
             log.exception('Call sync failed');raise HTTPException(502,f'Call sync failed: {str(exc) if isinstance(exc,RuntimeError) else type(exc).__name__}')
 
 @app.post('/api/employees/sync')
-async def sync_employees(role=Depends(admin_only)):
+async def sync_employees(role=Depends(auth)):
     if lock.locked():raise HTTPException(409,'Another operation is in progress')
     async with lock:
         try:return await work.fetch_employee_directory()
@@ -452,7 +452,7 @@ async def run_reminders():
     async with lock:return await work.due_reminders()
 
 @app.post('/api/requests/{request_id}/review')
-async def review_request(request_id:str,body:Review,role=Depends(admin_only)):
+async def review_request(request_id:str,body:Review,role=Depends(auth)):
     if lock.locked():raise HTTPException(409,'Another operation is in progress')
     async with lock:return await asyncio.to_thread(work.review,request_id,body.approved,body.reason,role)
 
@@ -635,7 +635,7 @@ class ResetInventory(BaseModel):
     confirmation: Literal['CLEAR_INVENTORY_SNAPSHOTS_ONLY']
 
 @app.post('/api/admin/inventory/clear')
-async def clear_inventory(body:ResetInventory,role=Depends(admin_only)):
+async def clear_inventory(body:ResetInventory,role=Depends(auth)):
     if lock.locked(): raise HTTPException(409,'Operation already running')
     async with lock:
         await require_reconciled()
@@ -707,7 +707,7 @@ def sync_agent_replacement_history():
         _quota_call(lambda: ws.append_rows(pending,value_input_option='RAW'))
     return {'synced':len(pending),'total':len(known),'source':'Change_Logs'}
 
-@app.post('/api/agent-history/sync',dependencies=[Depends(admin_only)])
+@app.post('/api/agent-history/sync',dependencies=[Depends(auth)])
 async def sync_agent_history_endpoint():
     try:return await asyncio.to_thread(sync_agent_replacement_history)
     except Exception as exc:
@@ -854,7 +854,7 @@ async def insights():
         log.exception('Insights read failed');raise HTTPException(503,'Unable to read report data from Google Sheets') from exc
 
 @app.post('/api/reassign',dependencies=[Depends(auth)])
-async def reassign(request:BatchRequest,role=Depends(admin_only)):
+async def reassign(request:BatchRequest,role=Depends(auth)):
     recent=await asyncio.to_thread(work.recent_agents,(await asyncio.to_thread(work.settings))['recent_replacement_days'])
     live=await asyncio.to_thread(get_rows,'Active_DIDs',DID_HEADERS)
     by_did={str(r.get('did_no')):r for r in live}
