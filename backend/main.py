@@ -699,6 +699,27 @@ async def sync_agent_history_endpoint():
         log.exception('Agent history synchronization failed')
         raise HTTPException(503,'Unable to synchronize agent replacement history') from exc
 
+@app.get('/api/employees/lookup',dependencies=[Depends(auth)])
+async def employee_email_lookup():
+    """Read-only email index from the Google Sheets employee directory.
+    Match by normalized agent number; ambiguous duplicate numbers are intentionally omitted.
+    """
+    try:
+        rows=await asyncio.to_thread(get_rows,'Employee_Directory',work.EMP_HEADERS)
+        emails={}
+        ambiguous=set()
+        for row in rows:
+            number=work.phone(str(row.get('agent_number','')))
+            email=str(row.get('email','')).strip()
+            if not number or not email or '@' not in email:continue
+            if number in emails and emails[number].casefold()!=email.casefold():ambiguous.add(number)
+            else:emails[number]=email
+        for number in ambiguous:emails.pop(number,None)
+        return {'by_phone':emails,'matched':len(emails),'ambiguous':len(ambiguous)}
+    except Exception as exc:
+        log.exception('Employee email lookup failed')
+        raise HTTPException(503,'Unable to load employee email directory') from exc
+
 @app.get('/api/agents/{agent_number}/profile',dependencies=[Depends(auth)])
 async def agent_profile(agent_number:str):
     phone=work.phone(agent_number)

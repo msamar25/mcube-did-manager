@@ -136,3 +136,19 @@ input[type=checkbox],input[type=radio]{accent-color:#ff6600}
 
 /* v42 dedicated agent detail page */
 .agent-full-page{position:fixed;inset:0;z-index:900;background:#f6f8fc;overflow-y:auto;padding:32px clamp(18px,4vw,72px);color:#18223c}.agent-page-top,.agent-page-heading{display:flex;align-items:center;justify-content:space-between;gap:18px}.agent-page-top{margin-bottom:24px}.agent-page-kicker{font-size:12px;letter-spacing:.12em;color:#ff6600;font-weight:750}.agent-page-heading{justify-content:flex-start;margin-bottom:28px}.agent-page-heading h1{margin:0;font-size:clamp(24px,3vw,38px)}.agent-page-heading p{margin:7px 0 0;color:#77829a}.agent-page-heading>.outline{margin-left:auto}.agent-avatar-large{width:68px;height:68px;font-size:26px;flex-shrink:0}.agent-detail-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:20px}.agent-detail-stats .summary-tile{min-height:120px;padding:22px;border-radius:16px}.agent-detail-stats .summary-tile strong{font-size:25px}.agent-detail-stats .summary-tile .agent-stat-date{font-size:15px}.agent-detail-columns{display:grid;grid-template-columns:1fr 1fr;gap:20px}.agent-content-card{background:#fff;border:1px solid #e3e9f4;border-radius:18px;padding:24px;margin-bottom:20px;box-shadow:0 8px 28px #2531540a}.agent-content-card h2{font-size:21px;margin:0 0 16px}.agent-content-card p{color:#7a849b}.agent-info-grid{display:grid;grid-template-columns:150px 1fr;gap:14px}.agent-info-grid dt,.agent-info-grid>span{color:#78849b}.agent-info-grid dd{margin:0;font-weight:650;overflow-wrap:anywhere}.agent-history-table{overflow-x:auto}.agent-history-table table{width:100%;border-collapse:collapse}.agent-history-table th{text-align:left;background:#f5f7fb;font-size:12px;letter-spacing:.03em}.agent-history-table td,.agent-history-table th{padding:15px;border-bottom:1px solid #edf0f5;white-space:nowrap}.agent-history-table td{font-size:14px}@media(max-width:900px){.agent-detail-stats{grid-template-columns:repeat(2,1fr)}.agent-detail-columns{grid-template-columns:1fr}}@media(max-width:560px){.agent-detail-stats{grid-template-columns:1fr 1fr;gap:9px}.agent-detail-stats .summary-tile{padding:13px;min-height:90px}.agent-detail-stats .summary-tile strong{font-size:17px}.agent-page-kicker{display:none}.agent-page-heading{flex-wrap:wrap}.agent-page-heading>.outline{margin-left:0}.agent-full-page{padding:18px 12px}.agent-content-card{padding:15px}.agent-info-grid{grid-template-columns:105px 1fr}}
+
+/* v43 compact summary and DID-focused directory */
+.did-overview.compact-overview{grid-template-columns:minmax(310px,.73fr) minmax(420px,1.27fr);gap:14px;margin:8px 0 16px}
+.compact-overview .did-summary-panel,.compact-overview .did-directory-panel{padding:18px 20px;border-radius:17px}
+.compact-overview .did-summary-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.compact-overview .summary-tile{min-height:84px;padding:12px 10px;border-radius:11px}
+.compact-overview .summary-tile strong{font-size:23px}
+.compact-overview .summary-tile span{font-size:11px}
+.compact-overview .did-overview p,.compact-overview p{margin-bottom:10px}
+.compact-overview .agent-preview-row{padding:7px 0}
+.compact-overview .agent-preview-name small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.email-cell{font-size:13px;max-width:250px;overflow-wrap:anywhere;color:#536176}
+.app .metric{border-left:0!important}
+.app .metric strong{color:#18213a!important}
+@media(max-width:1150px){.did-overview.compact-overview{grid-template-columns:1fr}.compact-overview .did-summary-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:580px){.compact-overview .did-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
