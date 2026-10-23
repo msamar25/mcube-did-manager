@@ -1,12 +1,12 @@
 """MCube DID replacement: sequential, fail-closed, Sheets-journaled operations."""
-import asyncio, json, logging, os, uuid, time, hmac, hashlib, secrets, base64, threading, random
+import asyncio, json, logging, os, uuid, time, hmac, hashlib, secrets, base64, threading, random, re
 from datetime import datetime, timezone, timedelta
 IST = timezone(timedelta(hours=5, minutes=30))
 from pathlib import Path
 from typing import Literal
 import httpx
 from fastapi import FastAPI, Depends, Header, HTTPException, Request
-from .workflows import Workflows, SettingsUpdate, QueueBatch, Review
+from .workflows import Workflows, EMP_HEADERS, REQUEST_HEADERS, SettingsUpdate, QueueBatch, Review
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -419,6 +419,119 @@ async def settings_history(role=Depends(admin_only)):
     from .workflows import SETTING_LOG_HEADERS
     return {'items':(await asyncio.to_thread(work.read,'Settings_Audit_Log',SETTING_LOG_HEADERS))[-200:]}
 
+# Public support intake: unauthenticated, but validated against assigned agents.
+# In-memory throttling is a best-effort anti-spam measure on a single Render worker.
+PUBLIC_REQUEST_EVENTS=['time_ist','submission_id','request_id','agent_number','event','repeat_count','source','issue_summary','submitted_employee_name','submitted_email']
+PUBLIC_REQUEST_RATE={}
+PUBLIC_REQUEST_LOCK=threading.Lock()
+
+class PublicSupportRequest(BaseModel):
+    agent_number: str = Field(min_length=10,max_length=20)
+    employee_name: str = Field(min_length=2,max_length=120)
+    email: str = Field(min_length=5,max_length=254)
+    issue_summary: str = Field(min_length=10,max_length=500)
+    website: str = ''  # Honeypot: must remain empty
+    turnstile_token: str = Field(default='', max_length=2048)
+
+async def verify_public_turnstile(token: str):
+    """Fail closed; never accept an unverified public support submission."""
+    secret=os.getenv('TURNSTILE_SECRET_KEY','').strip()
+    expected_host=os.getenv('TURNSTILE_EXPECTED_HOSTNAME','').strip().lower()
+    if not secret or not expected_host:
+        raise HTTPException(503,'Support form verification is not configured. Please contact support.')
+    if not token or len(token)>2048:
+        raise HTTPException(400,'Complete the security check before submitting.')
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response=await client.post('https://challenges.cloudflare.com/turnstile/v0/siteverify',
+                data={'secret':secret,'response':token})
+            response.raise_for_status()
+            result=response.json()
+    except (httpx.HTTPError,ValueError):
+        log.warning('Turnstile verification service unavailable')
+        raise HTTPException(503,'Security verification is temporarily unavailable. Please retry.')
+    if result.get('success') is not True or str(result.get('hostname','')).lower()!=expected_host:
+        raise HTTPException(400,'Security verification failed or expired. Please retry.')
+
+@app.get('/support-request',include_in_schema=False)
+async def public_request_page():
+    html=(Path(__file__).parent/'public_request.html').read_text(encoding='utf-8')
+    from fastapi.responses import HTMLResponse
+    import html as html_lib
+    site_key=html_lib.escape(os.getenv('TURNSTILE_SITE_KEY','').strip(),quote=True)
+    html=html.replace('__TURNSTILE_SITE_KEY__',site_key)
+    return HTMLResponse(html,headers={'Cache-Control':'no-store'})
+
+@app.post('/api/public/support-request')
+async def public_support_request(payload:PublicSupportRequest, request:Request):
+    if payload.website.strip():raise HTTPException(400,'Invalid submission')
+    await verify_public_turnstile(payload.turnstile_token)
+    phone=work.phone(payload.agent_number)
+    submitted_name=' '.join(payload.employee_name.strip().split())
+    submitted_email=payload.email.strip().lower()
+    if not submitted_name or '@' not in submitted_email or submitted_email.count('@')!=1 or '.' not in submitted_email.rsplit('@',1)[-1]:
+        raise HTTPException(422,'Enter a valid employee name and email address')
+    # Validate the submitted identity on the server, not only in the browser.
+    # Indian mobile numbers must begin 6-9. Reject obvious fabricated sequences.
+    if not re.fullmatch(r'[6-9][0-9]{9}', phone):
+        raise HTTPException(422,'Enter a valid 10-digit Indian mobile number')
+    if len(set(phone)) == 1 or phone in ('9876543210','9876543211','8765432109','9999999999','8888888888','7777777777','6666666666'):
+        raise HTTPException(422,'Enter your registered mobile number, not a sample number')
+    if not re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,119}", submitted_name) or len(submitted_name.replace(' ',''))<3:
+        raise HTTPException(422,'Enter your full registered employee name')
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9._%+\-]{0,62}[a-z0-9])?@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",submitted_email,re.I):
+        raise HTTPException(422,'Enter a valid official employee email address')
+    local,domain=submitted_email.rsplit('@',1)
+    if domain in {'example.com','example.org','example.net','test.com','test.org','invalid.com','mailinator.com','tempmail.com','10minutemail.com','yopmail.com'} or local in {'test','testing','dummy','sample','example','abc','abcd','admin','user','name'}:
+        raise HTTPException(422,'Enter your registered official email address, not a test address')
+    # Bound repeated submissions per IP and agent without recording the visitor IP in Sheets.
+    client=request.client.host if request.client else 'unknown'
+    key=hashlib.sha256((client+':'+phone).encode()).hexdigest()
+    with PUBLIC_REQUEST_LOCK:
+        now=time.monotonic()
+        recent=[t for t in PUBLIC_REQUEST_RATE.get(key,[]) if now-t<3600]
+        if len(recent)>=5:raise HTTPException(429,'Too many submissions. Please try again later.')
+        recent.append(now);PUBLIC_REQUEST_RATE[key]=recent
+    if lock.locked():raise HTTPException(409,'Support operations are busy; please retry shortly')
+    async with lock:
+        try:
+            # Require an unambiguous active DID assignment; do not accept client-supplied DID.
+            active=await asyncio.to_thread(work.read,'Active_DIDs',DID_HEADERS)
+            matches=[r for r in active if work.phone(r.get('agent_no') or r.get('agent_number'))==phone]
+            if len(matches)!=1:raise HTTPException(422,'Agent does not have one unique active DID assignment. Contact support.')
+            directory=await asyncio.to_thread(work.employees)
+            employees=[r for r in directory if work.phone(r.get('agent_number'))==phone]
+            if len(employees)!=1:raise HTTPException(422,'Agent not uniquely found in the employee directory')
+            employee=employees[0]
+            known_email=str(employee.get('email') or '').strip().lower()
+            known_name=str(employee.get('agent_name') or employee.get('employee_name') or employee.get('name') or '').strip()
+            if not known_email or not known_name:
+                raise HTTPException(422,'Employee directory record is incomplete. Contact support to update your registered name and email.')
+            if submitted_email!=known_email:
+                raise HTTPException(422,'Email does not match the registered employee record')
+            if known_name and ''.join(c for c in submitted_name.casefold() if c.isalnum())!=''.join(c for c in known_name.casefold() if c.isalnum()):
+                raise HTTPException(422,'Employee name does not match the registered record')
+            rows=await asyncio.to_thread(work.requests)
+            existing=next((r for r in rows if work.phone(r.get('agent_number'))==phone and r.get('status') in ('pending','review_required','approved','processing')),None)
+            stamp=work.now(); submission_id=str(uuid.uuid4()); recent=await asyncio.to_thread(work.recent_agents,3)
+            if existing:
+                existing['call_count']=int(existing.get('call_count') or 0)+1
+                existing['last_call_utc']=stamp
+                await asyncio.to_thread(work.update_request,existing)
+                req=existing; event='REPEAT_PUBLIC_SUBMISSION'
+            else:
+                req=dict.fromkeys(REQUEST_HEADERS,'')
+                req.update(request_id=str(uuid.uuid4()),callid='',callto=phone,agent_number=phone,agent_name=matches[0].get('agent_name') or employees[0].get('agent_name',''),agent_email=employees[0].get('email',''),current_did=str(matches[0].get('did_no','')),first_call_utc=stamp,last_call_utc=stamp,call_count=1,status='review_required' if phone in recent else 'pending',recent_warning='yes' if phone in recent else 'no',reminder_count=0)
+                await asyncio.to_thread(work.update_request,req)
+                event='PUBLIC_REQUEST_CREATED'
+            # Persist each submission even when merged into an existing pending request.
+            await asyncio.to_thread(work.append,'Public_Request_Events',PUBLIC_REQUEST_EVENTS,[stamp,submission_id,req['request_id'],phone,event,str(req['call_count']),'public_form',payload.issue_summary.strip(),submitted_name,submitted_email])
+            return {'ok':True,'request_id':req['request_id'],'repeated':event=='REPEAT_PUBLIC_SUBMISSION','message':'Request received by the support team.'}
+        except HTTPException:raise
+        except Exception:
+            log.exception('Public support request failed')
+            raise HTTPException(503,'Unable to save the request. Please try again later.')
+
 @app.get('/api/requests',dependencies=[Depends(auth)])
 async def get_requests():return {'items':await asyncio.to_thread(work.requests)}
 
@@ -729,7 +842,7 @@ def sync_agent_replacement_history():
     ws=worksheet(sheet(),'Agent_Replacement_History',AGENT_HISTORY_HEADERS)
     existing=_quota_call(lambda: ws.get_all_records(numericise_ignore=['all']))
     known={str(r.get('event_id','')) for r in existing}
-    employees=get_rows('Employee_Directory',work.EMP_HEADERS)
+    employees=get_rows('Employee_Directory',EMP_HEADERS)
     by_phone={work.phone(str(e.get('agent_number',''))):e for e in employees}
     pending=[]
     for index,event in enumerate(logs,2):
@@ -762,7 +875,7 @@ async def employee_email_lookup():
         # Read raw values to tolerate blank/duplicate header cells and malformed Sheets metadata.
         # Never infer email from agent name; agent_number is the sole join key.
         def read_directory_raw():
-            ws=worksheet(sheet(),'Employee_Directory',work.EMP_HEADERS)
+            ws=worksheet(sheet(),'Employee_Directory',EMP_HEADERS)
             values=_quota_call(lambda: ws.get_all_values())
             if not values:return []
             headers=[str(v).strip().lower().replace(' ','_') for v in values[0]]
@@ -798,7 +911,7 @@ async def agent_profile(agent_number:str):
     if not phone or len(phone)<8:raise HTTPException(400,'Invalid agent number')
     try:
         employees,requests,logs,history=await asyncio.gather(
-            asyncio.to_thread(get_rows,'Employee_Directory',work.EMP_HEADERS),
+            asyncio.to_thread(get_rows,'Employee_Directory',EMP_HEADERS),
             asyncio.to_thread(work.requests),
             asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS),
             asyncio.to_thread(get_rows,'Agent_Replacement_History',AGENT_HISTORY_HEADERS))
