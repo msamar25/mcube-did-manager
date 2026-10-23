@@ -1,0 +1,1 @@
+V72: Security widget revealed only after all employee details and issue are valid; compact widget; company-domain allowlist enforced client and server; MCube/LSQ labels; ticket-number success modal requiring Close; reset after Close. Ticket number SH-<first 12 hex of request UUID>, stable on repeated requests.

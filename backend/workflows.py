@@ -26,6 +26,7 @@ SETTINGS_HEADERS=['key','value']
 SETTING_LOG_HEADERS=['timestamp_utc','actor','key','old_value','new_value']
 REQUEST_HEADERS=['request_id','callid','callto','agent_number','agent_name','agent_email','current_did','first_call_utc','last_call_utc','call_count','status','recent_warning','last_reminder_utc','reminder_count','replacement_batch','replacement_new_did','completed_utc']
 # Legacy *_utc column names remain for existing Google Sheets compatibility; values are IST (+05:30).
+TICKET_EVENT_HEADERS=['timestamp_ist','event_id','request_id','ticket_no','event','source','actor','details']
 CALL_HEADERS=['callid','request_id','callto','starttime','endtime','dialstatus','direction','ingested_utc','current_did','request_did']
 NOTIFY_HEADERS=['timestamp_utc','request_id','kind','target','result','details']
 EMP_HEADERS=['agent_number','agent_name','email','updated_utc','agent_id','role','status','role3','role4','role5']
@@ -160,6 +161,12 @@ class Workflows:
    if str(row['request_id'])==str(req['request_id']): rows[i]=req;updated=True;break
   if not updated:rows.append(req)
   self.replace('Pending_Requests',REQUEST_HEADERS,[[r.get(h,'') for h in REQUEST_HEADERS] for r in rows])
+ @staticmethod
+ def ticket_no(request_id):
+  return 'SH-'+str(request_id).replace('-','')[:12].upper()
+ def ticket_event(self,req,event,source='system',actor='system',details=''):
+  # Append-only audit. Do not include full form PII or secrets in details.
+  self.append('Ticket_Events',TICKET_EVENT_HEADERS,[self.now(),str(uuid.uuid4()),str(req['request_id']),self.ticket_no(req['request_id']),event,source,str(actor)[:120],str(details)[:500]])
  def requests(self): return self.read('Pending_Requests',REQUEST_HEADERS)
  def employees(self): return self.read('Employee_Directory',EMP_HEADERS)
  def find_employee(self,number):
@@ -309,7 +316,7 @@ class Workflows:
   for number in ambiguous:agents.pop(number,None)
   previous={self.canonical_callid(x.get('callid')) for x in self.read('Call_Request_Events',CALL_HEADERS)}
   previous.discard('')
-  pending={str(x['agent_number']):x for x in self.requests() if x.get('status') in ('pending','review_required','approved','processing')}
+  pending={self.phone(x['agent_number']):x for x in self.requests() if x.get('status') in ('pending','review_required','approved','processing')}
   recent=self.recent_agents(cfg['recent_replacement_days'])
   created=0;repeated=0;ignored=0
   skipped={'invalid_record':0,'not_inbound':0,'not_cancelled':0,'missing_or_seen_callid':0,'employee_not_found':0,'no_unique_active_did':0,'request_did_mismatch':0,'invalid_call_time':0}
@@ -329,6 +336,10 @@ class Workflows:
    agent=agents[phone];emp=employee_map[phone];first=self.call_time(call.get('starttime'));end=self.call_time(call.get('endtime'))
    if not first:skipped['invalid_call_time']+=1;continue
    req=pending.get(phone)
+   if req and str(req.get('current_did'))!=str(agent.get('did_no')):
+    # Never merge an event for a changed DID into the previous replacement.
+    skipped.setdefault('active_did_changed',0);skipped['active_did_changed']+=1;continue
+   is_new=not bool(req)
    if req:
     req['last_call_utc']=max((str(req.get('last_call_utc') or ''),first),key=lambda x: datetime.fromisoformat(x.replace('Z','+00:00')).timestamp() if x else 0);req['call_count']=int(req.get('call_count') or 0)+1
     self.update_request(req);repeated+=1
@@ -339,7 +350,9 @@ class Workflows:
     req.update(request_id=reqid,callid=callid,callto=phone,agent_number=phone,agent_name=agent.get('agent_name','') or emp.get('agent_name',''),agent_email=emp.get('email',''),current_did=str(agent.get('did_no','')),first_call_utc=first,last_call_utc=first,call_count=1,status='review_required' if warning and cfg['require_recent_review'] else 'pending',recent_warning='yes' if warning else 'no',reminder_count=0)
     self.update_request(req);pending[phone]=req;created+=1
    self.append('Call_Request_Events',CALL_HEADERS,[callid,req['request_id'],phone,first,end,'cancel','inbound',self.now(),str(agent.get('did_no','')),str(cfg['request_did'])]);previous.add(callid)
-   if not req.get('replacement_batch') and int(req.get('call_count') or 0)==1 and str(req.get('callid'))==callid:
+   try:self.ticket_event(req,'TICKET_CREATED' if is_new else 'CALL_ATTACHED','call','mcube','Inbound cancelled call')
+   except Exception:log.exception('Ticket event audit failed for call %s',callid)
+   if is_new:
     if cfg['notify_on_queue']:
      await self.outbound_notification(req,'queued',cfg)
      if cfg.get('notify_level2_on_queue'):
@@ -456,4 +469,6 @@ class Workflows:
   req['status']='approved' if approved else 'rejected'
   self.update_request(req)
   self.append('Notification_Logs',NOTIFY_HEADERS,[self.now(),request_id,'review',actor,req['status'],reason])
+  try:self.ticket_event(req,'APPROVED' if approved else 'REJECTED','operator',actor,reason)
+  except Exception:log.exception('Ticket review audit failed; review state is already saved')
   return req

@@ -482,6 +482,8 @@ async def public_support_request(payload:PublicSupportRequest, request:Request):
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9._%+\-]{0,62}[a-z0-9])?@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",submitted_email,re.I):
         raise HTTPException(422,'Enter a valid official employee email address')
     local,domain=submitted_email.rsplit('@',1)
+    if domain not in {'u-next.com','onlinemanipal.com','mahe.onlinemanipal.com'}:
+        raise HTTPException(422,'Use your registered LSQ email address from an approved company domain')
     if domain in {'example.com','example.org','example.net','test.com','test.org','invalid.com','mailinator.com','tempmail.com','10minutemail.com','yopmail.com'} or local in {'test','testing','dummy','sample','example','abc','abcd','admin','user','name'}:
         raise HTTPException(422,'Enter your registered official email address, not a test address')
     # Bound repeated submissions per IP and agent without recording the visitor IP in Sheets.
@@ -512,28 +514,77 @@ async def public_support_request(payload:PublicSupportRequest, request:Request):
             if known_name and ''.join(c for c in submitted_name.casefold() if c.isalnum())!=''.join(c for c in known_name.casefold() if c.isalnum()):
                 raise HTTPException(422,'Employee name does not match the registered record')
             rows=await asyncio.to_thread(work.requests)
-            existing=next((r for r in rows if work.phone(r.get('agent_number'))==phone and r.get('status') in ('pending','review_required','approved','processing')),None)
+            existing=next((r for r in rows if work.phone(r.get('agent_number'))==phone and str(r.get('current_did'))==str(matches[0].get('did_no')) and r.get('status') in ('pending','review_required','approved','processing')),None)
             stamp=work.now(); submission_id=str(uuid.uuid4()); recent=await asyncio.to_thread(work.recent_agents,3)
             if existing:
-                existing['call_count']=int(existing.get('call_count') or 0)+1
-                existing['last_call_utc']=stamp
+                # Form submissions are not phone calls: never alter call counters or timestamps.
                 await asyncio.to_thread(work.update_request,existing)
                 req=existing; event='REPEAT_PUBLIC_SUBMISSION'
             else:
                 req=dict.fromkeys(REQUEST_HEADERS,'')
-                req.update(request_id=str(uuid.uuid4()),callid='',callto=phone,agent_number=phone,agent_name=matches[0].get('agent_name') or employees[0].get('agent_name',''),agent_email=employees[0].get('email',''),current_did=str(matches[0].get('did_no','')),first_call_utc=stamp,last_call_utc=stamp,call_count=1,status='review_required' if phone in recent else 'pending',recent_warning='yes' if phone in recent else 'no',reminder_count=0)
+                req.update(request_id=str(uuid.uuid4()),callid='',callto=phone,agent_number=phone,agent_name=matches[0].get('agent_name') or employees[0].get('agent_name',''),agent_email=employees[0].get('email',''),current_did=str(matches[0].get('did_no','')),first_call_utc=stamp,last_call_utc='',call_count=0,status='review_required' if phone in recent else 'pending',recent_warning='yes' if phone in recent else 'no',reminder_count=0)
                 await asyncio.to_thread(work.update_request,req)
                 event='PUBLIC_REQUEST_CREATED'
             # Persist each submission even when merged into an existing pending request.
-            await asyncio.to_thread(work.append,'Public_Request_Events',PUBLIC_REQUEST_EVENTS,[stamp,submission_id,req['request_id'],phone,event,str(req['call_count']),'public_form',payload.issue_summary.strip(),submitted_name,submitted_email])
-            return {'ok':True,'request_id':req['request_id'],'repeated':event=='REPEAT_PUBLIC_SUBMISSION','message':'Request received by the support team.'}
+            await asyncio.to_thread(work.append,'Public_Request_Events',PUBLIC_REQUEST_EVENTS,[stamp,submission_id,req['request_id'],phone,event,str(1+sum(1 for e in await asyncio.to_thread(work.read,'Public_Request_Events',PUBLIC_REQUEST_EVENTS) if str(e.get('request_id'))==str(req['request_id']))),'public_form',payload.issue_summary.strip(),submitted_name,submitted_email])
+            try:await asyncio.to_thread(work.ticket_event,req,'TICKET_CREATED' if event=='PUBLIC_REQUEST_CREATED' else 'FORM_ATTACHED','form','employee','Support form submitted')
+            except Exception:log.exception('Ticket event audit failed for public request')
+            return {'ok':True,'request_id':req['request_id'],'ticket_no':'SH-'+str(req['request_id']).replace('-','')[:12].upper(),'repeated':event=='REPEAT_PUBLIC_SUBMISSION','message':'Request received by the support team.'}
         except HTTPException:raise
         except Exception:
             log.exception('Public support request failed')
             raise HTTPException(503,'Unable to save the request. Please try again later.')
 
 @app.get('/api/requests',dependencies=[Depends(auth)])
-async def get_requests():return {'items':await asyncio.to_thread(work.requests)}
+async def get_requests():
+    # Derive channel from immutable call/form event logs, not from the last
+    # update to Pending_Requests. One open request may have BOTH sources.
+    items=await asyncio.to_thread(work.requests)
+    form_events=await asyncio.to_thread(work.read,'Public_Request_Events',PUBLIC_REQUEST_EVENTS)
+    call_events=await asyncio.to_thread(work.read,'Call_Request_Events',CALL_HEADERS)
+    channels={}
+    for event in form_events:
+        rid=str(event.get('request_id') or '')
+        if rid:
+            channels.setdefault(rid,{'form':0,'call':0})['form']+=1
+    for event in call_events:
+        rid=str(event.get('request_id') or '')
+        if rid:
+            channels.setdefault(rid,{'form':0,'call':0})['call']+=1
+    for item in items:
+        rid=str(item.get('request_id') or '')
+        counts=channels.get(rid,{'form':0,'call':0})
+        # Backward compatibility for historic requests without source events.
+        if not counts['form'] and not counts['call'] and item.get('callid'):
+            counts={'form':0,'call':1}
+        item['source_counts']=dict(counts)
+        item['total_interactions']=counts['call']+counts['form']
+        item['last_activity_utc']=max([str(item.get('last_call_utc') or '')]+[str(e.get('time_ist') or '') for e in form_events if str(e.get('request_id'))==rid])
+        item['request_source']='both' if counts['form'] and counts['call'] else 'form' if counts['form'] else 'call' if counts['call'] else 'unknown'
+        item['ticket_no']='SH-'+rid.replace('-','')[:12].upper()
+    return {'items':items}
+
+@app.get('/api/requests/{request_id}/timeline',dependencies=[Depends(auth)])
+async def request_timeline(request_id:str):
+    """Read-only ticket history, sourced from immutable call/form/change events."""
+    items=await asyncio.to_thread(work.requests)
+    req=next((r for r in items if str(r.get('request_id'))==request_id),None)
+    if req is None:raise HTTPException(404,'Ticket not found')
+    forms=await asyncio.to_thread(work.read,'Public_Request_Events',PUBLIC_REQUEST_EVENTS)
+    calls=await asyncio.to_thread(work.read,'Call_Request_Events',CALL_HEADERS)
+    audits=await asyncio.to_thread(work.read,'Ticket_Events',TICKET_EVENT_HEADERS)
+    timeline=[]
+    for e in calls:
+        if str(e.get('request_id'))==request_id:
+            timeline.append({'time':e.get('starttime') or e.get('ingested_utc'),'type':'Call','detail':'Inbound cancelled call','event_id':str(e.get('callid') or '')})
+    for e in forms:
+        if str(e.get('request_id'))==request_id:
+            timeline.append({'time':e.get('time_ist'),'type':'Form','detail':str(e.get('issue_summary') or '')[:500],'event_id':str(e.get('submission_id') or '')})
+    for e in audits:
+        if str(e.get('request_id'))==request_id and str(e.get('event')) not in ('TICKET_CREATED','FORM_ATTACHED','CALL_ATTACHED'):
+            timeline.append({'time':e.get('timestamp_ist'),'type':e.get('event'),'detail':str(e.get('details') or '')[:500],'event_id':str(e.get('event_id') or '')})
+    timeline.sort(key=lambda e:str(e.get('time') or ''))
+    return {'ticket_no':work.ticket_no(request_id),'request':req,'events':timeline,'source_counts':{'call':sum(1 for e in calls if str(e.get('request_id'))==request_id),'form':sum(1 for e in forms if str(e.get('request_id'))==request_id)}}
 
 @app.post('/api/requests/sync',dependencies=[Depends(auth)])
 async def sync_requests():
@@ -1134,6 +1185,8 @@ async def run_batch(batch,dids,request_map,lease):
                         if req:
                             req['status']='completed';req['replacement_new_did']=new;req['completed_utc']=work.now()
                             await asyncio.to_thread(work.update_request,req)
+                            try:await asyncio.to_thread(work.ticket_event,req,'COMPLETED','operator','mcube','Old DID deactivated and new DID assignment verified')
+                            except Exception:log.exception('Ticket completion audit failed')
                             cfg=await asyncio.to_thread(work.settings)
                             if cfg['notify_on_completion']:await work.outbound_notification(req,'completed',cfg)
                             if cfg['email_on_completion']:await work.send_email(req,'completed',cfg)
