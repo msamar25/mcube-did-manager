@@ -498,3 +498,31 @@ input[type=checkbox],input[type=radio]{accent-color:#ff6600}
 @media(max-width:899px){.app .did-table-viewport{overflow:auto!important;max-height:60dvh}.app .request-queue-column .table-scroll{overflow:auto!important;max-height:60dvh}}
 
 .public-request-link{color:#ec5f00;font-weight:700;text-decoration:none;margin-left:8px}.public-request-link:hover{text-decoration:underline}
+
+/* v69: restore Request overview without an independent scrollbar; give Dashboard stats breathing room. */
+@media (min-width:900px){
+  .app .request-workspace{grid-template-columns:minmax(245px,20.5fr) minmax(0,79.5fr)!important;gap:14px!important;}
+  .app .request-stat-column{overflow:hidden!important;min-height:0!important;display:flex!important;}
+  .app .request-stat-column>.stats-unified-card{flex:1!important;height:100%!important;min-height:0!important;overflow:hidden!important;padding:16px 16px!important;}
+  .app .request-stat-column .request-metrics{display:grid!important;grid-template-columns:minmax(0,1fr)!important;grid-template-rows:repeat(4,minmax(0,1fr))!important;min-height:0!important;flex:1!important;gap:0!important;margin:0!important;}
+  .app .request-stat-column .request-metrics .metric{min-height:0!important;height:auto!important;display:flex!important;flex-direction:column!important;justify-content:center!important;padding:10px 10px 10px 58px!important;margin:0!important;}
+  .app .request-stat-column .request-metrics .metric:before{left:8px!important;top:50%!important;transform:translateY(-50%)!important;width:38px!important;height:38px!important;}
+  .app .request-stat-column .request-metrics .metric span{font-size:12px!important;line-height:1.3!important;}
+  .app .request-stat-column .request-metrics .metric strong{font-size:27px!important;line-height:1.15!important;margin-top:6px!important;}
+  .app .did-workspace{grid-template-columns:minmax(265px,20.5fr) minmax(0,79.5fr)!important;gap:16px!important;}
+  .app:has(.did-workspace) .container{padding-left:clamp(20px,2.3vw,46px)!important;padding-right:clamp(20px,2.3vw,46px)!important;}
+  .app .did-stats-column .stats-unified-card{padding-left:18px!important;padding-right:18px!important;}
+  .app .did-stats-column .stats-unified-list .did-stat-card{padding-left:6px!important;padding-right:6px!important;column-gap:15px!important;}
+}
+@media (max-width:899px){.app .request-stat-column{overflow:visible!important}.app .request-stat-column .stats-unified-card{height:auto!important}}
+
+/* v70: Request statistics share Dashboard's exact card layout and icon alignment. */
+@media (min-width:900px){
+ .app .request-stat-column>.stats-unified-card{display:flex!important;flex-direction:column!important;padding:18px!important;overflow:hidden!important;}
+ .app .request-stat-column .request-metrics.stats-unified-list{display:grid!important;grid-template-columns:minmax(0,1fr)!important;grid-template-rows:repeat(4,minmax(0,1fr))!important;flex:1!important;min-height:0!important;gap:0!important;margin-top:14px!important;}
+ .app .request-stat-column .request-metrics .did-stat-card{display:grid!important;grid-template-columns:42px minmax(0,1fr)!important;grid-template-rows:min-content min-content!important;column-gap:15px!important;row-gap:4px!important;align-content:center!important;min-height:0!important;padding:14px 6px!important;margin:0!important;border-radius:0!important;}
+ .app .request-stat-column .request-metrics .did-stat-card .stat-symbol{grid-column:1!important;grid-row:1/span 2!important;width:38px!important;height:38px!important;position:static!important;transform:none!important;}
+ .app .request-stat-column .request-metrics .did-stat-card>span:not(.stat-symbol){grid-column:2!important;grid-row:1!important;font-size:12px!important;line-height:1.2!important;}
+ .app .request-stat-column .request-metrics .did-stat-card>strong{grid-column:2!important;grid-row:2!important;font-size:29px!important;line-height:1.1!important;margin:0!important;}
+}
+@media(max-width:899px){.app .request-stat-column .request-metrics.stats-unified-list{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:8px!important}.app .request-stat-column .request-metrics .did-stat-card{min-height:95px!important}}

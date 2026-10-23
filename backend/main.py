@@ -457,9 +457,9 @@ async def verify_public_turnstile(token: str):
 async def public_request_page():
     html=(Path(__file__).parent/'public_request.html').read_text(encoding='utf-8')
     from fastapi.responses import HTMLResponse
-    import html as html_lib
-    site_key=html_lib.escape(os.getenv('TURNSTILE_SITE_KEY','').strip(),quote=True)
-    html=html.replace('__TURNSTILE_SITE_KEY__',site_key)
+    import json
+    site_key=os.getenv('TURNSTILE_SITE_KEY','').strip()
+    html=html.replace('__TURNSTILE_SITE_KEY_JSON__',json.dumps(site_key))
     return HTMLResponse(html,headers={'Cache-Control':'no-store'})
 
 @app.post('/api/public/support-request')
