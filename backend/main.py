@@ -1181,13 +1181,66 @@ async def agent_profile(agent_number:str):
             if key not in known:
                 related_history.append({'completed_at_ist':e.get('time_utc',''),'batch_id':key[0],'old_did':key[1],'new_did':key[2],'agent_number':phone,'agent_name':e.get('agent_name',''),'result':'SUCCESS','source':'Change_Logs (not yet synced)'})
                 known.add(key)
+        agent_events=_lifecycle_events(logs,phone=phone)
         related_history.sort(key=lambda r:str(r.get('completed_at_ist','')),reverse=True)
         related_requests.sort(key=lambda r:str(r.get('first_call_utc','')),reverse=True)
-        return {'agent_number':phone,'employee':employee,'requests':related_requests,'replacements':related_history,'replacement_count':len(related_history),'request_count':len(related_requests)}
+        return {'agent_number':phone,'employee':employee,'requests':related_requests,'replacements':related_history,'replacement_count':len(related_history),'request_count':len(related_requests),'lifecycle_events':agent_events,'history_scope':'Only logged operations and recorded requests are available; missing historical periods are unknown.'}
     except HTTPException:raise
     except Exception as exc:
         log.exception('Agent profile load failed')
         raise HTTPException(503,'Unable to read agent profile from Google Sheets') from exc
+
+# v81 Phase 1: read-only DID lifecycle intelligence derived from the existing
+# append-only Change_Logs journal. No extra MCube calls or Sheets writes.
+def _lifecycle_events(logs, *, phone='', did=''):
+    events=[]
+    for row in logs:
+        agent=work.phone(str(row.get('agent_number','')))
+        old=str(row.get('old_did','')).strip(); new=str(row.get('new_did','')).strip()
+        if phone and agent!=phone:continue
+        if did and did not in (old,new):continue
+        events.append({'time_ist':str(row.get('time_utc','')),'event':str(row.get('event','')),
+          'agent_number':agent,'agent_name':str(row.get('agent_name','')),
+          'old_did':old,'new_did':new,'batch_id':str(row.get('batch_id','')),
+          'result':str(row.get('result','')),'details':str(row.get('details','')),
+          'source':'Change_Logs'})
+    return sorted(events,key=lambda x:x['time_ist'],reverse=True)
+
+@app.get('/api/intelligence/current-conflicts',dependencies=[Depends(auth)])
+async def current_did_conflicts():
+    """Snapshot-only duplicates; never claim historical overlap from snapshots."""
+    try:
+        rows=await asyncio.to_thread(get_rows,'Active_DIDs',DID_HEADERS)
+        by_did={};by_agent={}
+        for row in rows:
+            did=str(row.get('did_no','')).strip();agent=work.phone(str(row.get('agent_no','')))
+            if did and agent:by_did.setdefault(did,set()).add(agent);by_agent.setdefault(agent,set()).add(did)
+        return {'duplicate_dids':[{'did':k,'agent_numbers':sorted(v)} for k,v in by_did.items() if len(v)>1],
+          'agents_with_multiple_dids':[{'agent_number':k,'dids':sorted(v)} for k,v in by_agent.items() if len(v)>1],
+          'scope':'Current Active_DIDs snapshot only. Historical overlap cannot be confirmed without complete assignment intervals.'}
+    except Exception as exc:
+        log.exception('Conflict check failed')
+        raise HTTPException(503,'Unable to read current DID snapshot') from exc
+
+@app.get('/api/dids/{did}/passport',dependencies=[Depends(auth)])
+async def did_passport(did:str):
+    did=did.strip()
+    if not re.fullmatch(r'\d{8,15}',did):raise HTTPException(422,'Invalid DID number')
+    try:
+        logs,active=await asyncio.gather(asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS),
+          asyncio.to_thread(get_rows,'Active_DIDs',DID_HEADERS))
+        events=_lifecycle_events(logs,did=did)
+        current=[{'agent_number':work.phone(str(r.get('agent_no',''))),'agent_name':str(r.get('agent_name','')),
+          'operator':str(r.get('operator',''))} for r in active if str(r.get('did_no','')).strip()==did]
+        distinct_agents=sorted({e['agent_number'] for e in events if e['agent_number']})
+        return {'did':did,'current_assignments':current,'events':events,'event_count':len(events),
+          'historical_agents_in_journal':len(distinct_agents),
+          'history_scope':'Only events captured by Change_Logs. Earlier assignments and exact start/end times may be unknown.',
+          'current_snapshot_warning':'Current assignment is from last synchronized Active_DIDs snapshot, not a live MCube query.'}
+    except HTTPException:raise
+    except Exception as exc:
+        log.exception('DID passport read failed')
+        raise HTTPException(503,'Unable to read DID lifecycle') from exc
 
 @app.get('/api/insights',dependencies=[Depends(auth)])
 async def insights():
