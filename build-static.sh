@@ -5,14 +5,16 @@ set -euo pipefail
 
 cd frontend
 
-# Install dependencies
-npm ci --no-audit --no-fund
+# Install frontend dependencies
+npm install --no-audit --no-fund
 
-# Generate clean runtime configuration using Node.js
+# Generate clean runtime configuration without Python
 node -e '
 const fs = require("fs");
 
-const url = (process.env.BACKEND_PUBLIC_URL || "").trim().replace(/\/+$/, "");
+const url = (process.env.BACKEND_PUBLIC_URL || "")
+  .trim()
+  .replace(/\/+$/, "");
 
 if (!/^https:\/\/[a-z0-9.-]+(?::[0-9]+)?$/i.test(url)) {
   console.error("Invalid BACKEND_PUBLIC_URL:", url);
@@ -28,7 +30,7 @@ fs.writeFileSync(
 console.log("Runtime configuration generated successfully");
 '
 
-# Build Svelte frontend
+# Build Svelte application
 npm run build
 
 echo "Static frontend build completed successfully"
