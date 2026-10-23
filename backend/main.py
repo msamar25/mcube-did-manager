@@ -7,7 +7,7 @@ from typing import Literal
 import httpx
 from fastapi import FastAPI, Depends, Header, HTTPException, Request
 from .workflows import Workflows, EMP_HEADERS, REQUEST_HEADERS, CALL_HEADERS, TICKET_EVENT_HEADERS, SettingsUpdate, QueueBatch, Review
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -915,6 +915,87 @@ async def scheduled_sync(x_cron_secret: str | None = Header(default=None)):
                 status='unrecorded'
             results[job]=status
         return {'status':'completed','jobs':results,'timezone':'Asia/Kolkata'}
+
+# v79: independent, fast-acknowledging scheduled jobs. Acknowledgment is not completion.
+# Only one process/worker is supported; the task can be interrupted by Render restart.
+SPLIT_JOB_NAMES=frozenset(SYNC_INTERVALS)
+_split_task=None
+_split_active=None
+_split_started=None
+
+async def _split_log(job, attempt, last_success, status, detail):
+    await asyncio.to_thread(work.append,'Sync_Jobs',SYNC_JOB_HEADERS,
+                            [job,attempt,last_success,status,str(detail)[:300]])
+
+async def _split_execute(job):
+    global _split_active,_split_started
+    attempt=datetime.now(timezone.utc).isoformat()
+    last_success=''
+    try:
+        async with lock:
+            # Record intent before contacting MCube. A restart leaves a visible 'running' row.
+            rows=await asyncio.to_thread(work.read,'Sync_Jobs',SYNC_JOB_HEADERS)
+            history=[r for r in rows if str(r.get('job',''))==job]
+            if history:
+                last_success=str(history[-1].get('last_success_utc') or '')
+                try:
+                    when=datetime.fromisoformat(last_success.replace('Z','+00:00'))
+                    if when.tzinfo is None:when=when.replace(tzinfo=timezone.utc)
+                    if (datetime.now(timezone.utc)-when).total_seconds()<SYNC_INTERVALS[job]*60:
+                        return
+                except (ValueError,TypeError):pass
+            await _split_log(job,attempt,last_success,'running','Scheduled job started')
+            try:
+                if job=='calls':
+                    await asyncio.to_thread(work.recover_requests)
+                    await work.sync_calls()
+                elif job=='inventory':
+                    async with httpx.AsyncClient(timeout=25) as client:
+                        lists=await fetch_lists(client)
+                    await asyncio.to_thread(snapshot_sync,lists)
+                elif job=='employees':
+                    await work.fetch_employee_directory()
+                elif job=='recovery':
+                    await asyncio.to_thread(work.recover_requests)
+                last_success=datetime.now(timezone.utc).isoformat()
+                await _split_log(job,attempt,last_success,'success','Completed')
+            except asyncio.CancelledError:
+                # Best effort only; abrupt container shutdown cannot guarantee this write.
+                try:await _split_log(job,attempt,last_success,'interrupted','Worker cancelled')
+                except Exception:log.exception('Could not record cancellation')
+                raise
+            except Exception as exc:
+                log.exception('Split scheduled job %s failed',job)
+                try:await _split_log(job,attempt,last_success,'failed',type(exc).__name__)
+                except Exception:log.exception('Could not record job failure')
+    except asyncio.CancelledError:raise
+    except Exception:log.exception('Split scheduled job %s setup failed',job)
+    finally:
+        _split_active=None
+        _split_started=None
+
+@app.post('/api/jobs/sync/{job}')
+async def split_scheduled_sync(job: str, x_cron_secret: str | None = Header(default=None)):
+    global _split_task,_split_active,_split_started
+    if not _cron_authorized(x_cron_secret):raise HTTPException(401,'Unauthorized')
+    if job not in SPLIT_JOB_NAMES:raise HTTPException(404,'Unknown scheduled job')
+    now=datetime.now(IST)
+    minute=now.hour*60+now.minute
+    if minute<8*60+30 or minute>23*60+10:
+        return {'status':'outside_business_hours','job':job,'timezone':'Asia/Kolkata'}
+    if lock.locked() or (_split_task is not None and not _split_task.done()):
+        return {'status':'busy','job':job,'active_job':_split_active,'retry':True}
+    _split_active=job
+    _split_started=datetime.now(timezone.utc).isoformat()
+    _split_task=asyncio.create_task(_split_execute(job))
+    return JSONResponse(status_code=202,content={
+        'status':'accepted','job':job,'started_utc':_split_started,
+        'message':'Job queued in this Render process; acceptance does not mean completion.'})
+
+@app.get('/api/jobs/runner-status',dependencies=[Depends(auth)])
+async def split_runner_status():
+    return {'active_job':_split_active,'started_utc':_split_started,
+            'running':bool(_split_task is not None and not _split_task.done())}
 
 @app.get('/api/jobs/status',dependencies=[Depends(auth)])
 async def scheduled_sync_status():
