@@ -31,6 +31,8 @@ CALL_HEADERS=['callid','request_id','callto','starttime','endtime','dialstatus',
 NOTIFY_HEADERS=['timestamp_utc','request_id','kind','target','result','details']
 EMP_HEADERS=['agent_number','agent_name','email','updated_utc','agent_id','role','status','role3','role4','role5']
 SYNC_HEADERS=['key','value']
+# Immutable, replayable intent log. Each ticket update is journaled before its snapshot.
+REQUEST_MUTATION_HEADERS=['mutation_id','timestamp_ist','request_id','payload_json']
 
 class SettingsUpdate(BaseModel):
  settings:dict
@@ -154,13 +156,53 @@ class Workflows:
   if self.settings()!=new: raise HTTPException(503,'Settings write verification failed')
   for k,a,b in changes: self.append('Settings_Audit_Log',SETTING_LOG_HEADERS,[self.now(),actor,k,json.dumps(a),json.dumps(b)])
   return {'ok':True,'version':self.settings_version(),'changed':len(changes)}
- def update_request(self,req):
+ def _write_request_snapshot(self,req):
+  """Materialize one ticket; only the ledger is authoritative after partial failure."""
   rows=self.read('Pending_Requests',REQUEST_HEADERS)
-  updated=False
   for i,row in enumerate(rows):
-   if str(row['request_id'])==str(req['request_id']): rows[i]=req;updated=True;break
-  if not updated:rows.append(req)
+   if str(row.get('request_id'))==str(req['request_id']):
+    rows[i]=req
+    break
+  else:rows.append(req)
   self.replace('Pending_Requests',REQUEST_HEADERS,[[r.get(h,'') for h in REQUEST_HEADERS] for r in rows])
+
+ def update_request(self,req):
+  """Durable intent first. If materialization fails, recovery can replay it."""
+  if not str(req.get('request_id') or ''):raise ValueError('request_id required')
+  payload={h:req.get(h,'') for h in REQUEST_HEADERS}
+  self.append('Request_Mutations',REQUEST_MUTATION_HEADERS,[str(uuid.uuid4()),self.now(),str(req['request_id']),json.dumps(payload,ensure_ascii=False,separators=(',',':'))])
+  self._write_request_snapshot(payload)
+
+ def recover_requests(self):
+  """Replay only latest durable intent for each ticket, in append order.
+
+  Safe to retry after an interrupted snapshot write. Call only while holding
+  the application operation gate; never run concurrently with ticket writes.
+  """
+  journal=self.read('Request_Mutations',REQUEST_MUTATION_HEADERS)
+  latest={}
+  for entry in journal:
+   try:
+    rid=str(entry.get('request_id') or '')
+    data=json.loads(entry.get('payload_json') or '')
+    if not rid or not isinstance(data,dict) or str(data.get('request_id'))!=rid:raise ValueError('invalid mutation')
+    latest[rid]={h:data.get(h,'') for h in REQUEST_HEADERS}
+   except (ValueError,TypeError):
+    log.error('Invalid Request_Mutations entry; recovery stopped')
+    raise RuntimeError('Request mutation ledger contains an invalid entry; manual review required')
+  if not latest:return {'journal_entries':0,'repaired':0}
+  rows=self.read('Pending_Requests',REQUEST_HEADERS)
+  index={str(r.get('request_id')):i for i,r in enumerate(rows)}
+  repaired=0
+  for rid,expected in latest.items():
+   i=index.get(rid)
+   if i is None:
+    rows.append(expected);index[rid]=len(rows)-1;repaired+=1
+   elif any(str(rows[i].get(h,'') or '')!=str(expected.get(h,'') or '') for h in REQUEST_HEADERS):
+    rows[i]=expected;repaired+=1
+  if repaired:
+   self.replace('Pending_Requests',REQUEST_HEADERS,[[r.get(h,'') for h in REQUEST_HEADERS] for r in rows])
+  return {'journal_entries':len(journal),'repaired':repaired}
  @staticmethod
  def ticket_no(request_id):
   return 'SH-'+str(request_id).replace('-','')[:12].upper()
@@ -316,7 +358,7 @@ class Workflows:
   for number in ambiguous:agents.pop(number,None)
   previous={self.canonical_callid(x.get('callid')) for x in self.read('Call_Request_Events',CALL_HEADERS)}
   previous.discard('')
-  pending={self.phone(x['agent_number']):x for x in self.requests() if x.get('status') in ('pending','review_required','approved','processing')}
+  pending={(self.phone(x.get('agent_number')),str(x.get('current_did') or '')):x for x in self.requests() if x.get('status') in ('pending','review_required','approved','processing')}
   recent=self.recent_agents(cfg['recent_replacement_days'])
   created=0;repeated=0;ignored=0
   skipped={'invalid_record':0,'not_inbound':0,'not_cancelled':0,'missing_or_seen_callid':0,'employee_not_found':0,'no_unique_active_did':0,'request_did_mismatch':0,'invalid_call_time':0}
@@ -335,10 +377,9 @@ class Workflows:
    if call.get('clicktocalldid') and self.phone(call.get('clicktocalldid'))!=self.phone(cfg['request_did']):skipped['request_did_mismatch']+=1;continue
    agent=agents[phone];emp=employee_map[phone];first=self.call_time(call.get('starttime'));end=self.call_time(call.get('endtime'))
    if not first:skipped['invalid_call_time']+=1;continue
-   req=pending.get(phone)
-   if req and str(req.get('current_did'))!=str(agent.get('did_no')):
-    # Never merge an event for a changed DID into the previous replacement.
-    skipped.setdefault('active_did_changed',0);skipped['active_did_changed']+=1;continue
+   # Match on both employee and assigned DID; do not silently merge two replacement contexts.
+   request_key=(phone,str(agent.get('did_no') or ''))
+   req=pending.get(request_key)
    is_new=not bool(req)
    if req:
     req['last_call_utc']=max((str(req.get('last_call_utc') or ''),first),key=lambda x: datetime.fromisoformat(x.replace('Z','+00:00')).timestamp() if x else 0);req['call_count']=int(req.get('call_count') or 0)+1
@@ -348,7 +389,7 @@ class Workflows:
     warning=phone in recent
     req=dict.fromkeys(REQUEST_HEADERS,'')
     req.update(request_id=reqid,callid=callid,callto=phone,agent_number=phone,agent_name=agent.get('agent_name','') or emp.get('agent_name',''),agent_email=emp.get('email',''),current_did=str(agent.get('did_no','')),first_call_utc=first,last_call_utc=first,call_count=1,status='review_required' if warning and cfg['require_recent_review'] else 'pending',recent_warning='yes' if warning else 'no',reminder_count=0)
-    self.update_request(req);pending[phone]=req;created+=1
+    self.update_request(req);pending[request_key]=req;created+=1
    self.append('Call_Request_Events',CALL_HEADERS,[callid,req['request_id'],phone,first,end,'cancel','inbound',self.now(),str(agent.get('did_no','')),str(cfg['request_did'])]);previous.add(callid)
    try:self.ticket_event(req,'TICKET_CREATED' if is_new else 'CALL_ATTACHED','call','mcube','Inbound cancelled call')
    except Exception:log.exception('Ticket event audit failed for call %s',callid)

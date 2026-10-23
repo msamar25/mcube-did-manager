@@ -9,7 +9,7 @@ class MatchingTests(unittest.TestCase):
   self.assertEqual(self.w.phone('123'),'')
   self.assertEqual(self.w.phone('999999999999999999'),'')
  def test_timezone(self):
-  self.assertEqual(self.w.call_time('2026-10-19 12:31:22'),'2026-10-19T07:01:22+00:00')
+  self.assertEqual(self.w.call_time('2026-10-19 12:31:22'),'2026-10-19T12:31:22+05:30')
   self.assertEqual(self.w.call_time('bad'),'')
 
 if __name__=='__main__':unittest.main()
