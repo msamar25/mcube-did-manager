@@ -860,6 +860,49 @@ async def public_config():
 SYNC_JOB_HEADERS=['job','last_attempt_utc','last_success_utc','status','details']
 SYNC_INTERVALS={'calls':5,'inventory':15,'employees':60,'recovery':15}
 
+# Intervals configured in the UI (App_Settings). SYNC_INTERVALS above stays as the fallback
+# when a setting is missing or invalid; floors stop a typo from hammering MCube / Google Sheets.
+JOB_SETTING_KEYS={'calls':'auto_calls_minutes','inventory':'auto_inventory_minutes','employees':'auto_employee_minutes'}
+JOB_MIN_MINUTES={'calls':2,'inventory':5,'employees':30,'recovery':15,'history':30}
+HISTORY_INTERVAL_MINUTES=60
+
+def job_intervals(cfg=None):
+    out=dict(SYNC_INTERVALS)
+    for job,key in JOB_SETTING_KEYS.items():
+        try:value=int((cfg or {}).get(key))
+        except (TypeError,ValueError):continue
+        out[job]=max(JOB_MIN_MINUTES[job],min(value,10000))
+    return out
+
+async def _load_intervals():
+    try:return job_intervals(await asyncio.to_thread(work.settings))
+    except Exception:
+        log.exception('Could not read App_Settings; using default sync intervals')
+        return dict(SYNC_INTERVALS)
+
+def _last_success(rows):
+    latest={}
+    for row in rows:latest[str(row.get('job',''))]=row
+    out={}
+    for job,row in latest.items():
+        try:
+            when=datetime.fromisoformat(str(row.get('last_success_utc') or '').replace('Z','+00:00'))
+            if when.tzinfo is None:when=when.replace(tzinfo=timezone.utc)
+            out[job]=when
+        except (ValueError,TypeError):pass
+    return out
+
+def pick_due_job(rows,intervals,now=None):
+    """Most overdue job by UI interval; None when nothing is due. Never-run jobs are due first."""
+    now=now or datetime.now(timezone.utc)
+    last=_last_success(rows)
+    best=None;best_over=0.0
+    for job,minutes in intervals.items():
+        when=last.get(job)
+        over=float('inf') if when is None else (now-when).total_seconds()-minutes*60
+        if over>=0 and (best is None or over>best_over):best,best_over=job,over
+    return best
+
 def _cron_authorized(value):
     expected=os.getenv('CRON_SYNC_SECRET','')
     return bool(expected and value and hmac.compare_digest(expected,value))
@@ -882,7 +925,7 @@ async def scheduled_sync(x_cron_secret: str | None = Header(default=None)):
             latest[str(row.get('job',''))]=row
         due=[]
         utc_now=datetime.now(timezone.utc)
-        for job,minutes in SYNC_INTERVALS.items():
+        for job,minutes in (await _load_intervals()).items():
             last=latest.get(job,{}).get('last_success_utc','')
             try:
                 last_dt=datetime.fromisoformat(str(last).replace('Z','+00:00'))
@@ -918,7 +961,7 @@ async def scheduled_sync(x_cron_secret: str | None = Header(default=None)):
 
 # v79: independent, fast-acknowledging scheduled jobs. Acknowledgment is not completion.
 # Only one process/worker is supported; the task can be interrupted by Render restart.
-SPLIT_JOB_NAMES=frozenset(SYNC_INTERVALS)
+SPLIT_JOB_NAMES=frozenset({*SYNC_INTERVALS,'history'})
 _split_task=None
 _split_active=None
 _split_started=None
@@ -941,7 +984,8 @@ async def _split_execute(job):
                 try:
                     when=datetime.fromisoformat(last_success.replace('Z','+00:00'))
                     if when.tzinfo is None:when=when.replace(tzinfo=timezone.utc)
-                    if (datetime.now(timezone.utc)-when).total_seconds()<SYNC_INTERVALS[job]*60:
+                    intervals={**(await _load_intervals()),'history':HISTORY_INTERVAL_MINUTES}
+                    if (datetime.now(timezone.utc)-when).total_seconds()<intervals.get(job,15)*60:
                         return
                 except (ValueError,TypeError):pass
             await _split_log(job,attempt,last_success,'running','Scheduled job started')
@@ -957,6 +1001,8 @@ async def _split_execute(job):
                     await work.fetch_employee_directory()
                 elif job=='recovery':
                     await asyncio.to_thread(work.recover_requests)
+                elif job=='history':
+                    await asyncio.to_thread(sync_agent_replacement_history)
                 last_success=datetime.now(timezone.utc).isoformat()
                 await _split_log(job,attempt,last_success,'success','Completed')
             except asyncio.CancelledError:
@@ -974,6 +1020,32 @@ async def _split_execute(job):
         _split_active=None
         _split_started=None
 
+def _start_split(job):
+    global _split_task,_split_active,_split_started
+    _split_active=job
+    _split_started=datetime.now(timezone.utc).isoformat()
+    _split_task=asyncio.create_task(_split_execute(job))
+    return JSONResponse(status_code=202,content={
+        'status':'accepted','job':job,'started_utc':_split_started,
+        'message':'Job queued in this Render process; acceptance does not mean completion.'})
+
+# v86: one cron entry for everything. Call every 1-2 minutes; the backend runs the single most
+# overdue job according to the intervals configured in the UI (App_Settings).
+@app.post('/api/jobs/sync/auto')
+async def auto_scheduled_sync(x_cron_secret: str | None = Header(default=None)):
+    if not _cron_authorized(x_cron_secret):raise HTTPException(401,'Unauthorized')
+    now=datetime.now(IST)
+    minute=now.hour*60+now.minute
+    if minute<8*60+30 or minute>23*60+10:
+        return {'status':'outside_business_hours','timezone':'Asia/Kolkata'}
+    if lock.locked() or (_split_task is not None and not _split_task.done()):
+        return {'status':'busy','active_job':_split_active,'retry':True}
+    intervals={**(await _load_intervals()),'history':HISTORY_INTERVAL_MINUTES}
+    rows=await asyncio.to_thread(work.read,'Sync_Jobs',SYNC_JOB_HEADERS)
+    job=pick_due_job(rows,intervals)
+    if not job:return {'status':'idle','intervals_minutes':intervals,'timezone':'Asia/Kolkata'}
+    return _start_split(job)
+
 @app.post('/api/jobs/sync/{job}')
 async def split_scheduled_sync(job: str, x_cron_secret: str | None = Header(default=None)):
     global _split_task,_split_active,_split_started
@@ -985,12 +1057,7 @@ async def split_scheduled_sync(job: str, x_cron_secret: str | None = Header(defa
         return {'status':'outside_business_hours','job':job,'timezone':'Asia/Kolkata'}
     if lock.locked() or (_split_task is not None and not _split_task.done()):
         return {'status':'busy','job':job,'active_job':_split_active,'retry':True}
-    _split_active=job
-    _split_started=datetime.now(timezone.utc).isoformat()
-    _split_task=asyncio.create_task(_split_execute(job))
-    return JSONResponse(status_code=202,content={
-        'status':'accepted','job':job,'started_utc':_split_started,
-        'message':'Job queued in this Render process; acceptance does not mean completion.'})
+    return _start_split(job)
 
 @app.get('/api/jobs/runner-status',dependencies=[Depends(auth)])
 async def split_runner_status():
