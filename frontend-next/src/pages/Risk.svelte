@@ -1,4 +1,5 @@
 <script>
+  import { can } from '../lib/session.svelte.js';
   import { db, opStats, totals } from '../lib/store.svelte.js';
   import { go } from '../lib/router.svelte.js';
   import { computeAlerts, DEFAULT_RULES } from '../lib/risk.js';
@@ -21,7 +22,7 @@
 <PageHead title="Risk Radar" eyebrow="Command Center">
   {#snippet actions()}
     <button class="btn" onclick={() => (stamp = Date.now())}><Icon name="refresh" size={14} />Recalculate</button>
-    <button class="btn btn-primary" disabled={!visible.length} onclick={() => downloadCsv(visible.map((a) => ({ severity: a.severity, category: a.kind, subject: a.subject, detail: a.detail, agent_number: a.agent_number || '', did: a.did || '', generated_utc: new Date(stamp).toISOString() })), 'did-risk-alerts.csv')}><Icon name="download" size={14} />Export alerts</button>
+    {#if can.reports()}<button class="btn btn-primary" disabled={!visible.length} onclick={() => downloadCsv(visible.map((a) => ({ severity: a.severity, category: a.kind, subject: a.subject, detail: a.detail, agent_number: a.agent_number || '', did: a.did || '', generated_utc: new Date(stamp).toISOString() })), 'did-risk-alerts.csv')}><Icon name="download" size={14} />Export alerts</button>{/if}
   {/snippet}
 </PageHead>
 

@@ -23,21 +23,44 @@ ACCESS_HEADERS = ['email', 'app_id', 'app_role', 'status', 'updated_utc', 'updat
 SETTING_HEADERS = ['scope', 'key', 'value', 'updated_utc', 'updated_by']
 AUDIT_HEADERS = ['time_ist', 'actor', 'action', 'target', 'details']
 REPORT_HEADERS = ['report_id', 'owner', 'name', 'app_id', 'dataset', 'config_json', 'shared', 'updated_utc']
+PERM_HEADERS = ['email', 'app_id', 'permission', 'allowed', 'updated_utc', 'updated_by']
+SESSION_HEADERS = ['email', 'sid', 'issued_utc', 'ended_utc']
 
 # App catalog. A new app is added here (plus its screens); access and settings then work automatically.
 APPS = [
     {'id': 'did', 'name': 'DID Replacement', 'description': 'DID inventory, FIFO replacement, support requests', 'status': 'live',
-     'roles': ['admin', 'operator'], 'color': '#f26b1d', 'icon': 'swap'},
+     'roles': ['admin', 'operator'], 'color': '#f26b1d', 'icon': 'swap',
+     # permission → roles that have it by default. Defaults are editable per app (App Settings) and
+     # can be allowed/denied per user (Users & Access). Defaults equal the previous fixed rules.
+     'permissions': [
+         {'id': 'settings', 'label': 'Settings & data setup', 'roles': ['admin']},
+         {'id': 'credentials', 'label': 'MCube credentials', 'roles': ['admin']},
+         {'id': 'audit', 'label': 'Audit log', 'roles': ['admin']},
+         {'id': 'replace', 'label': 'Run DID replacements & reviews', 'roles': ['admin', 'operator']},
+         {'id': 'reports', 'label': 'Reports & exports', 'roles': ['admin', 'operator']},
+     ]},
     {'id': 'users', 'name': 'User Management', 'description': 'Users, app access, global and app settings', 'status': 'live',
      'roles': ['admin'], 'color': '#2a6fdb', 'icon': 'users'},
     {'id': 'deb', 'name': 'DEB Operations', 'description': 'In development', 'status': 'planned',
      'roles': ['admin', 'member'], 'color': '#7a5af8', 'icon': 'layers'},
 ]
 APP_IDS = {a['id'] for a in APPS}
-GLOBAL_DEFAULTS = {'org_name': 'UNext', 'session_hours': '8', 'allowed_email_domains': '', 'launcher_notice': ''}
+GLOBAL_DEFAULTS = {'org_name': 'UNext', 'session_hours': '8', 'single_session': 'true', 'allowed_email_domains': '', 'launcher_notice': ''}
 APP_DEFAULTS = {'enabled': 'true', 'maintenance_message': ''}
 GLOBAL_KEYS = set(GLOBAL_DEFAULTS)
 APP_KEYS = set(APP_DEFAULTS)
+
+
+def app_meta(app_id):
+    return next((a for a in APPS if a['id'] == app_id), None)
+
+
+def perm_meta(app_id, perm):
+    return next((p for p in (app_meta(app_id) or {}).get('permissions', []) if p['id'] == perm), None)
+
+
+def _truthy(v):
+    return str(v).strip().lower() in ('true', '1', 'yes', 'on')
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 CACHE_TTL = 30
 
@@ -59,6 +82,7 @@ class Platform:
         self._write = threading.Lock()
         self._cache = None
         self._at = 0.0
+        self._sids = {}  # email → current session id, set at sign-in by this process (authoritative over the sheet cache)
 
     # ---------- storage ----------
     def _ws(self, title, headers):
@@ -83,6 +107,8 @@ class Platform:
                     'users': {_norm(r.get('email')): r for r in self._values('Platform_Users', USER_HEADERS) if _norm(r.get('email'))},
                     'access': [r for r in self._values('Platform_App_Access', ACCESS_HEADERS) if _norm(r.get('email'))],
                     'settings': self._values('Platform_Settings', SETTING_HEADERS),
+                    'perms': [r for r in self._values('Platform_Permissions', PERM_HEADERS) if _norm(r.get('email'))],
+                    'sessions': {_norm(r.get('email')): str(r.get('sid') or '') for r in self._values('Platform_Sessions', SESSION_HEADERS) if _norm(r.get('email'))},
                 }
             except HTTPException:
                 raise
@@ -149,10 +175,93 @@ class Platform:
     def settings(self, scope='global', data=None):
         data = data or self._load()
         base = dict(GLOBAL_DEFAULTS if scope == 'global' else APP_DEFAULTS)
+        if scope != 'global':
+            for p in (app_meta(scope) or {}).get('permissions', []):
+                base['perm:' + p['id']] = ','.join(p['roles'])
         for r in data['settings']:
             if str(r.get('scope', '')).strip() == scope and str(r.get('key', '')).strip() in base:
                 base[str(r['key']).strip()] = str(r.get('value', ''))
         return base
+
+    # ---------- permissions ----------
+    def perms_for(self, email, app_id, role, data=None, super_admin=False):
+        """Permissions a user has inside an app: role defaults (App Settings) + per-user allow/deny."""
+        meta = app_meta(app_id) or {}
+        if not role:
+            return []
+        if super_admin:
+            return [p['id'] for p in meta.get('permissions', [])]
+        data = data or self._load()
+        st = self.settings(app_id, data)
+        have = {p['id'] for p in meta.get('permissions', []) if role in [x.strip() for x in st.get('perm:' + p['id'], '').split(',')]}
+        email = _norm(email)
+        for r in data.get('perms', []):
+            if _norm(r.get('email')) != email or str(r.get('app_id', '')).strip() != app_id:
+                continue
+            pid, allowed = str(r.get('permission', '')).strip(), str(r.get('allowed', '')).strip().lower()
+            if not perm_meta(app_id, pid):
+                continue
+            if allowed == 'allow':
+                have.add(pid)
+            elif allowed == 'deny':
+                have.discard(pid)
+        return sorted(have)
+
+    def has_perm(self, email, app_id, perm, token_role=''):
+        try:
+            data = self._load()
+            ident = self.resolve(email, data)
+        except Exception:
+            log.exception('Platform permissions unreadable; using role defaults')
+            p = perm_meta(app_id, perm)
+            return bool(p and token_role in p['roles'])
+        if not ident:
+            p = perm_meta(app_id, perm)
+            return bool(p and token_role in p['roles'])
+        return perm in ident['perms'].get(app_id, [])
+
+    # ---------- single session ----------
+    def start_session(self, email, sid):
+        email = _norm(email)
+        self._sids[email] = sid
+        try:
+            with self._write:
+                self._upsert('Platform_Sessions', SESSION_HEADERS, lambda r: _norm(r.get('email')) == email,
+                             {'email': email, 'sid': sid, 'issued_utc': self._now(), 'ended_utc': ''})
+        except Exception:
+            log.exception('Session record write failed; kept in memory')
+
+    def end_session(self, email, sid):
+        email = _norm(email)
+        if self._current_sid(email) != sid:
+            return
+        self._sids[email] = ''
+        try:
+            with self._write:
+                self._upsert('Platform_Sessions', SESSION_HEADERS, lambda r: _norm(r.get('email')) == email, {'sid': '', 'ended_utc': self._now()})
+        except Exception:
+            log.exception('Session end write failed')
+
+    def _current_sid(self, email):
+        if email in self._sids:
+            return self._sids[email]
+        try:
+            return self._load().get('sessions', {}).get(email)
+        except Exception:
+            return None
+
+    def session_ok(self, email, sid):
+        """False when 'one session per user' is on and a newer sign-in replaced this one."""
+        email = _norm(email)
+        try:
+            if not _truthy(self.settings('global').get('single_session', 'true')):
+                return True
+        except Exception:
+            return True
+        cur = self._current_sid(email)
+        if cur is None:  # no record (first sign-in after upgrade, or sheet unreadable)
+            return True
+        return bool(sid) and cur == sid
 
     def app_enabled(self, app_id, data=None):
         return str(self.settings(app_id, data).get('enabled', 'true')).strip().lower() not in ('false', '0', 'no', 'off')
@@ -185,9 +294,14 @@ class Platform:
                     apps.pop(app, None)
                 elif role in meta['roles']:
                     apps[app] = role
+        perms = {a: self.perms_for(email, a, r, data, sup) for a, r in apps.items()}
+        overrides = {}
+        for r in data.get('perms', []):
+            if _norm(r.get('email')) == email and str(r.get('allowed', '')).strip().lower() in ('allow', 'deny'):
+                overrides.setdefault(str(r.get('app_id', '')).strip(), {})[str(r.get('permission', '')).strip()] = str(r.get('allowed')).strip().lower()
         return {'email': email, 'name': str((row or {}).get('display_name') or ''), 'status': status,
                 'super_admin': sup, 'source': 'environment' if (sup or email in env) else 'user_management',
-                'default_app': str((row or {}).get('default_app') or ''), 'apps': apps}
+                'default_app': str((row or {}).get('default_app') or ''), 'apps': apps, 'perms': perms, 'overrides': overrides}
 
     def login_lookup(self, email):
         """(token_role, pin_hash, pin_role) for a user allowed to sign in, else None.
@@ -246,7 +360,8 @@ class Platform:
         ident = self.resolve(email, data)
         if not ident:
             ident = {'email': email, 'name': '', 'status': 'active', 'super_admin': False, 'source': 'environment', 'default_app': '',
-                     'apps': {'did': token_role} if token_role in ('admin', 'operator') else {}}
+                     'apps': {'did': token_role} if token_role in ('admin', 'operator') else {},
+                     'perms': {'did': [p['id'] for p in app_meta('did')['permissions'] if token_role in p['roles']]}}
         g = self.settings('global', data)
         apps = []
         for a in APPS:
@@ -258,6 +373,7 @@ class Platform:
                 continue
             st = self.settings(a['id'], data)
             apps.append({**{k: a[k] for k in ('id', 'name', 'description', 'color', 'icon', 'status')}, 'role': role or '',
+                         'permissions': ident.get('perms', {}).get(a['id'], []),
                          'enabled': self.app_enabled(a['id'], data), 'maintenance_message': st.get('maintenance_message', '')})
         return {'email': ident['email'], 'name': ident['name'], 'super_admin': ident['super_admin'], 'default_app': ident['default_app'],
                 'can_manage_users': self.can_manage(ident), 'apps': apps,
@@ -337,6 +453,21 @@ class Platform:
                              lambda r, a=app: _norm(r.get('email')) == email and str(r.get('app_id')).strip() == a,
                              {'email': email, 'app_id': app, 'app_role': want, 'status': 'granted' if want else 'revoked', 'updated_utc': now, 'updated_by': actor})
                 changes.append(f'{app}:{want or "revoked"}')
+            # per-user permission overrides: {app: {permission: 'allow' | 'deny' | ''}} ('' = role default)
+            cur_ov = (self.resolve(email, data) or {}).get('overrides', {})
+            for app, ov in (body.get('perms') or {}).items():
+                if not isinstance(ov, dict) or app not in APP_IDS:
+                    continue
+                for pid, val in ov.items():
+                    val = str(val or '').strip().lower()
+                    if not perm_meta(app, pid) or val not in ('allow', 'deny', ''):
+                        raise HTTPException(400, f'Invalid permission {app}:{pid}')
+                    if cur_ov.get(app, {}).get(pid, '') == val:
+                        continue
+                    self._upsert('Platform_Permissions', PERM_HEADERS,
+                                 lambda r, a=app, q=pid: _norm(r.get('email')) == email and str(r.get('app_id')).strip() == a and str(r.get('permission')).strip() == q,
+                                 {'email': email, 'app_id': app, 'permission': pid, 'allowed': val or 'default', 'updated_utc': now, 'updated_by': actor})
+                    changes.append(f'{app}.{pid}:{val or "default"}')
             self.invalidate()
         self.audit(actor, 'USER_' + result.upper(), email, f'status={status}; apps={",".join(changes) or "unchanged"}' + ('; pin reset' if pin else ''))
         return {'ok': True, 'result': result}
@@ -349,7 +480,7 @@ class Platform:
     def save_settings(self, actor, scope, values):
         if scope != 'global' and scope not in APP_IDS:
             raise HTTPException(400, 'Unknown settings scope')
-        allowed = GLOBAL_KEYS if scope == 'global' else APP_KEYS
+        allowed = GLOBAL_KEYS if scope == 'global' else APP_KEYS | {'perm:' + p['id'] for p in (app_meta(scope) or {}).get('permissions', [])}
         if not isinstance(values, dict) or not values:
             raise HTTPException(400, 'No settings to save')
         clean = {}
@@ -357,6 +488,13 @@ class Platform:
             if k not in allowed:
                 raise HTTPException(400, f'Unknown setting {k}')
             v = str(v if v is not None else '').strip()[:500]
+            if k.startswith('perm:'):
+                roles = [x.strip() for x in v.split(',') if x.strip()]
+                if any(x not in app_meta(scope)['roles'] for x in roles):
+                    raise HTTPException(400, f'Unknown role in {k}')
+                v = ','.join(roles)
+            if k == 'single_session':
+                v = 'true' if _truthy(v) else 'false'
             if k == 'session_hours' and not re.fullmatch(r'\d{1,2}', v or '8'):
                 raise HTTPException(400, 'Session length must be 1 to 12 hours')
             if k == 'session_hours' and not 1 <= int(v or 8) <= 12:

@@ -103,22 +103,38 @@ async def login_verify(payload: LoginVerify):
     OTP_CHALLENGES.pop(payload.challenge_id,None)
     await asyncio.to_thread(_safe_access_log, record['email'], record['role'], 'LOGIN_SUCCESS', '/api/auth/verify', 'SUCCESS')
     hours=await asyncio.to_thread(platform.session_hours)
-    return {'token':_sign({'kind':'session','role':record['role'],'email':record['email'],'exp':int(time.time()+hours*3600)}),'role':record['role'],'expires_in':hours*3600}
+    # v89: one active session per user (Global settings). A new sign-in replaces the previous session id.
+    sid=secrets.token_urlsafe(12)
+    await asyncio.to_thread(platform.start_session,record['email'],sid)
+    return {'token':_sign({'kind':'session','role':record['role'],'email':record['email'],'sid':sid,'exp':int(time.time()+hours*3600)}),'role':record['role'],'expires_in':hours*3600}
 
 async def identity(authorization: str | None = Header(None)):
     """Any signed-in user (platform level: launcher, own reports)."""
     supplied=(authorization or '').removeprefix('Bearer ').strip()
     if not supplied:raise HTTPException(401,'Login required')
-    return _verify(supplied)
+    ident=_verify(supplied)
+    if not await asyncio.to_thread(platform.session_ok,ident.get('email',''),ident.get('sid','')):
+        raise HTTPException(401,'You were signed out because this account signed in on another device or browser.')
+    return ident
 
 async def auth(authorization: str | None = Header(None)):
     """DID Replacement app access. Returns the user's role inside the DID app (admin/operator)."""
     ident=await identity(authorization)
     return await asyncio.to_thread(platform.did_role,ident.get('email',''),ident.get('role',''))
 
-async def admin_only(role=Depends(auth)):
-    if role!='admin':raise HTTPException(403,'Administrator permission required')
-    return role
+def need(permission):
+    """DID app access plus one DID permission (role defaults in App Settings, per-user overrides)."""
+    async def dep(authorization: str | None = Header(None)):
+        ident=await identity(authorization)
+        role=await asyncio.to_thread(platform.did_role,ident.get('email',''),ident.get('role',''))
+        if not await asyncio.to_thread(platform.has_perm,ident.get('email',''),'did',permission,role):
+            label={'settings':'Settings','credentials':'MCube credentials','audit':'Audit log','replace':'Replacement','reports':'Reports'}.get(permission,permission)
+            raise HTTPException(403,f'{label} permission required')
+        return role
+    return dep
+
+# Settings, recovery and data tools: the 'settings' permission (administrators by default, as before).
+admin_only = need('settings')
 
 # Quota-aware Sheets access. Caches only non-authoritative inventory snapshots.
 # NEVER cache Operation_Queue, Change_Logs, approvals or safety checks.
@@ -218,7 +234,8 @@ async def identity_audit_middleware(request: Request, call_next):
 
 @app.post('/api/auth/logout')
 async def logout(ident=Depends(identity)):
-    # Middleware records the identity and logout action. The client then discards its token.
+    # Middleware records the identity and logout action; the session id stops being valid.
+    await asyncio.to_thread(platform.end_session,ident.get('email',''),ident.get('sid',''))
     return {'ok':True}
 
 # Durable fail-closed recovery gate. Google Sheets is a journal, NOT a lock.
@@ -381,9 +398,8 @@ async def me(ident=Depends(identity)):
     did=next((a for a in info.get('apps',[]) if a['id']=='did'),None)
     return {**info,'role':(did or {}).get('role') or ident['role'],'email':ident.get('email','')}
 
-@app.get('/api/settings',dependencies=[Depends(auth)])
-async def get_settings(role=Depends(auth)):
-    if role!='admin':raise HTTPException(403,'Administrator permission required')
+@app.get('/api/settings')
+async def get_settings(role=Depends(admin_only)):
     try:
         return {'settings':await asyncio.to_thread(work.settings),'version':await asyncio.to_thread(work.settings_version)}
     except HTTPException:
@@ -409,7 +425,7 @@ class MCubeCredentialsInput(BaseModel):
     password: str = Field(min_length=1,max_length=2048)
 
 @app.get('/api/mcube-config/credentials/status')
-async def mcube_credentials_status(role=Depends(admin_only)):
+async def mcube_credentials_status(role=Depends(need('credentials'))):
     from .mcube_config_auth import configured
     try:return {'configured':await asyncio.to_thread(configured,sys.modules[__name__])}
     except HTTPException:raise
@@ -418,7 +434,7 @@ async def mcube_credentials_status(role=Depends(admin_only)):
         raise HTTPException(503,'Cannot read MCube credential status') from exc
 
 @app.put('/api/mcube-config/credentials')
-async def save_mcube_credentials(body:MCubeCredentialsInput,role=Depends(admin_only)):
+async def save_mcube_credentials(body:MCubeCredentialsInput,role=Depends(need('credentials'))):
     from .mcube_config_auth import save
     if lock.locked():raise HTTPException(409,'Another operation is running')
     async with lock:
@@ -431,7 +447,7 @@ async def save_mcube_credentials(body:MCubeCredentialsInput,role=Depends(admin_o
             raise HTTPException(503,'MCube credentials could not be saved') from exc
 
 @app.post('/api/mcube-config/credentials/test')
-async def test_mcube_credentials(role=Depends(admin_only)):
+async def test_mcube_credentials(role=Depends(need('credentials'))):
     from .mcube_config_auth import fresh_token
     async with httpx.AsyncClient(timeout=30) as client:
         await fresh_token(sys.modules[__name__],client)
@@ -578,6 +594,9 @@ async def get_requests():
     items=await asyncio.to_thread(work.requests)
     form_events=await asyncio.to_thread(work.read,'Public_Request_Events',PUBLIC_REQUEST_EVENTS)
     call_events=await asyncio.to_thread(work.read,'Call_Request_Events',CALL_HEADERS)
+    # v89: requests created by "Import requests" (no call or form) are labelled 'import'
+    try:imported={str(e.get('request_id') or '') for e in await asyncio.to_thread(work.read,'Ticket_Events',TICKET_EVENT_HEADERS) if e.get('event')=='REQUEST_IMPORTED'}
+    except Exception:imported=set()
     channels={}
     for event in form_events:
         rid=str(event.get('request_id') or '')
@@ -604,7 +623,7 @@ async def get_requests():
         item['total_interactions']=counts['call']+counts['form']
         last_candidates=[v for v in (_ticket_timestamp(item.get('last_call_utc')),latest_forms.get(rid)) if v]
         item['last_activity_utc']=max(last_candidates).isoformat() if last_candidates else str(item.get('first_call_utc') or '')
-        item['request_source']='both' if counts['form'] and counts['call'] else 'form' if counts['form'] else 'call' if counts['call'] else 'unknown'
+        item['request_source']='both' if counts['form'] and counts['call'] else 'form' if counts['form'] else 'call' if counts['call'] else 'import' if rid in imported else 'unknown'
         item['ticket_no']='SH-'+rid.replace('-','')[:12].upper()
     return {'items':items}
 
@@ -709,7 +728,7 @@ async def run_reminders():
     async with lock:return await work.due_reminders()
 
 @app.post('/api/requests/{request_id}/review')
-async def review_request(request_id:str,body:Review,role=Depends(auth)):
+async def review_request(request_id:str,body:Review,role=Depends(need('replace'))):
     if lock.locked():raise HTTPException(409,'Another operation is in progress')
     async with lock:
         await asyncio.to_thread(work.recover_requests)
@@ -720,8 +739,8 @@ async def notifications():
     from .workflows import NOTIFY_HEADERS
     return {'items':(await asyncio.to_thread(work.read,'Notification_Logs',NOTIFY_HEADERS))[-300:]}
 
-@app.post('/api/requests/reassign',dependencies=[Depends(auth)])
-async def queue_reassign(body:QueueBatch, role=Depends(auth)):
+@app.post('/api/requests/reassign')
+async def queue_reassign(body:QueueBatch, role=Depends(need('replace'))):
     if len(set(body.request_ids))!=len(body.request_ids): raise HTTPException(422,'Duplicate requests')
     reqs=await asyncio.to_thread(work.requests)
     lookup={str(x['request_id']):x for x in reqs}
@@ -1114,7 +1133,7 @@ class ResetInventory(BaseModel):
     confirmation: Literal['CLEAR_INVENTORY_SNAPSHOTS_ONLY']
 
 @app.post('/api/admin/inventory/clear')
-async def clear_inventory(body:ResetInventory,role=Depends(auth)):
+async def clear_inventory(body:ResetInventory,role=Depends(admin_only)):
     if lock.locked(): raise HTTPException(409,'Operation already running')
     async with lock:
         await require_reconciled()
@@ -1405,8 +1424,8 @@ async def insights():
     except Exception as exc:
         log.exception('Insights read failed');raise HTTPException(503,'Unable to read report data from Google Sheets') from exc
 
-@app.post('/api/reassign',dependencies=[Depends(auth)])
-async def reassign(request:BatchRequest,role=Depends(auth)):
+@app.post('/api/reassign')
+async def reassign(request:BatchRequest,role=Depends(need('replace'))):
     recent=await asyncio.to_thread(work.recent_agents,(await asyncio.to_thread(work.settings))['recent_replacement_days'])
     live=await asyncio.to_thread(get_rows,'Active_DIDs',DID_HEADERS)
     by_did={str(r.get('did_no')):r for r in live}
@@ -1564,6 +1583,7 @@ class PlatformUserInput(BaseModel):
     default_app: str = Field(default='',max_length=20)
     notes: str = Field(default='',max_length=300)
     apps: dict[str,str] = Field(default_factory=dict)
+    perms: dict[str,dict[str,str]] = Field(default_factory=dict)
 
 class PlatformSettingsInput(BaseModel):
     scope: str = Field(min_length=1,max_length=20)
@@ -1629,6 +1649,165 @@ async def employee_directory():
     keep=('agent_number','agent_name','email','role','status','role3','role4','role5','updated_utc','agent_id')
     return {'items':[{k:str(r.get(k,'')) for k in keep} for r in rows]}
 
+
+# ---------------- v89: live ticket feed (cheap, shared cache) ----------------
+_LIVE_CACHE={'at':0.0,'data':None}
+_LIVE_LOCK=asyncio.Lock()
+LIVE_FIELDS=('request_id','agent_number','agent_name','current_did','status','first_call_utc','last_call_utc','completed_utc','replacement_new_did','call_count','recent_warning')
+
+@app.get('/api/live',dependencies=[Depends(auth)])
+async def live_feed():
+    """Ticket statuses for the live dashboards. One Sheets read per 15 s however many people watch."""
+    async with _LIVE_LOCK:
+        if _LIVE_CACHE['data'] is None or time.monotonic()-_LIVE_CACHE['at']>15:
+            try:rows=await asyncio.to_thread(work.requests)
+            except Exception as exc:
+                if _LIVE_CACHE['data'] is None:raise HTTPException(503,'Unable to read requests') from exc
+                rows=None
+            if rows is not None:
+                items=[{k:str(r.get(k,'') if r.get(k) is not None else '') for k in LIVE_FIELDS} for r in rows]
+                sig=hashlib.sha1(json.dumps(items,sort_keys=True).encode()).hexdigest()[:16]
+                _LIVE_CACHE.update(at=time.monotonic(),data={'items':items,'sig':sig,'read_at':datetime.now(IST).isoformat(timespec='seconds')})
+        d=_LIVE_CACHE['data']
+    return {**d,'batch':{'running':state['running'],'done':state['done'],'total':state['total'],'batch_id':state['batch_id']}}
+
+# ---------------- v89: import requests by agent number or email ----------------
+class RequestImport(BaseModel):
+    entries: list[str] = Field(min_length=1,max_length=200)
+    comment: str = Field(min_length=10,max_length=500)
+
+@app.post('/api/requests/import')
+async def import_requests(body:RequestImport,authorization: str | None = Header(None),role=Depends(need('replace'))):
+    """Create replacement requests for listed agents. Each line is an agent mobile number or email and must match
+    exactly one active employee in Employee_Directory (MCube sync) holding exactly one active DID. The comment
+    (who raised it / why) is stored on the ticket. Lines that fail are returned with the reason; nothing is guessed."""
+    actor=_verify((authorization or '').removeprefix('Bearer ').strip()).get('email','')
+    comment=' '.join(body.comment.split())
+    if len(comment)<10:raise HTTPException(422,'Comment must say who raised the request and why (at least 10 characters)')
+    if lock.locked():raise HTTPException(409,'Another operation is in progress; try again shortly')
+    async with lock:
+        directory=await asyncio.to_thread(work.employees)
+        active=await asyncio.to_thread(work.read,'Active_DIDs',DID_HEADERS)
+        await asyncio.to_thread(work.recover_requests)
+        rows=await asyncio.to_thread(work.requests)
+        cfg=await asyncio.to_thread(work.settings)
+        recent=await asyncio.to_thread(work.recent_agents,cfg.get('recent_replacement_days',3))
+        by_phone,by_email={}, {}
+        for e in directory:
+            ph=work.phone(e.get('agent_number'))
+            if ph:by_phone.setdefault(ph,[]).append(e)
+            em=str(e.get('email') or '').strip().lower()
+            if em:by_email.setdefault(em,[]).append(e)
+        created,failed,seen=[],[],set()
+        for raw in body.entries:
+            entry=str(raw).strip()
+            if not entry:continue
+            is_email='@' in entry
+            key=entry.lower() if is_email else work.phone(entry)
+            def fail(reason):failed.append({'entry':entry,'reason':reason})
+            if not is_email and not re.fullmatch(r'[6-9][0-9]{9}',key or ''):fail('Agent number is not a valid 10-digit mobile number');continue
+            if key in seen:fail('Listed twice in this import');continue
+            seen.add(key)
+            found=(by_email if is_email else by_phone).get(key,[])
+            if not found:fail('Email not found in the MCube employee directory' if is_email else 'Agent number not found in the MCube employee directory');continue
+            if len(found)>1:fail('Matches more than one employee in the directory');continue
+            emp=found[0]
+            if str(emp.get('status','')).strip().lower() in ('0','inactive','deactivated','disabled','false'):fail('Agent is deactivated in MCube');continue
+            phone=work.phone(emp.get('agent_number'))
+            dids=[r for r in active if work.phone(r.get('agent_no') or r.get('agent_number'))==phone]
+            if not dids:fail('Agent has no active DID assigned');continue
+            if len(dids)>1:fail('Agent holds more than one active DID; fix in MCube first');continue
+            did=str(dids[0].get('did_no',''))
+            open_req=next((r for r in rows if work.phone(r.get('agent_number'))==phone and str(r.get('current_did'))==did and r.get('status') in ('pending','review_required','approved','processing','needs_reconciliation')),None)
+            if open_req:fail('Already has an open request '+'SH-'+str(open_req['request_id']).replace('-','')[:12].upper());continue
+            req=dict.fromkeys(REQUEST_HEADERS,'')
+            warn=phone in recent
+            req.update(request_id=str(uuid.uuid4()),callid='',callto=phone,agent_number=phone,agent_name=dids[0].get('agent_name') or emp.get('agent_name',''),agent_email=emp.get('email',''),current_did=did,first_call_utc=work.now(),last_call_utc='',call_count=0,status='review_required' if warn and cfg.get('require_recent_review',True) else 'pending',recent_warning='yes' if warn else 'no',reminder_count=0)
+            try:
+                await asyncio.to_thread(work.update_request,req)
+                rows.append(req)
+                try:await asyncio.to_thread(work.ticket_event,req,'REQUEST_IMPORTED','import',actor,comment)
+                except Exception:log.exception('Import ticket event failed')
+                created.append({'entry':entry,'request_id':req['request_id'],'ticket_no':'SH-'+req['request_id'].replace('-','')[:12].upper(),'agent_name':req['agent_name'],'agent_number':phone,'current_did':did,'status':req['status']})
+            except Exception:
+                log.exception('Import request write failed');fail('Could not save to Google Sheets; try again')
+        _LIVE_CACHE['data']=None
+    return {'created':created,'failed':failed}
+
+# ---------------- v89: data setup (clear Google Sheets data with backup) ----------------
+from .workflows import NOTIFY_HEADERS, SYNC_HEADERS, SETTING_LOG_HEADERS, REQUEST_MUTATION_HEADERS
+DATA_GROUPS={
+    'inventory':{'label':'DID inventory snapshots','tabs':[('Active_DIDs',DID_HEADERS),('Inactive_DIDs',DID_HEADERS),('DID_Pool_FIFO',FIFO_HEADERS),('Sync_Status',['last_sync_utc','active','inactive','pool'])]},
+    'requests':{'label':'Support requests, calls and ticket events','tabs':[('Pending_Requests',REQUEST_HEADERS),('Call_Request_Events',CALL_HEADERS),('Ticket_Events',TICKET_EVENT_HEADERS),('Public_Request_Events',PUBLIC_REQUEST_EVENTS),('Request_Mutations',REQUEST_MUTATION_HEADERS),('Workflow_Sync',SYNC_HEADERS)]},
+    'notifications':{'label':'Notification log','tabs':[('Notification_Logs',NOTIFY_HEADERS)]},
+    'employees':{'label':'Employee directory','tabs':[('Employee_Directory',EMP_HEADERS)]},
+    'history':{'label':'Agent replacement history','tabs':[('Agent_Replacement_History',AGENT_HISTORY_HEADERS)]},
+    'journal':{'label':'Change log and operation queue','tabs':[('Change_Logs',LOG_HEADERS),('Operation_Queue',QUEUE_HEADERS)]},
+    'jobs':{'label':'Scheduled job status','tabs':[('Sync_Jobs',SYNC_JOB_HEADERS)]},
+    'activity':{'label':'Sign-in and settings audit logs','tabs':[('User_Activity_Logs',ACCESS_HEADERS),('Settings_Audit_Log',SETTING_LOG_HEADERS)]},
+}
+# Never cleared here: App_Settings, MCube_Config_Credentials and all Platform_* tabs.
+DATA_CONFIRM='CLEAR_SELECTED_DATA'
+
+class DataClear(BaseModel):
+    groups: list[str] = Field(min_length=1,max_length=len(DATA_GROUPS))
+    confirmation: str
+
+def _tab_rows(name,headers):
+    try:return max(0,len(_quota_call(lambda: worksheet(sheet(),name,headers).get_all_values()))-1)
+    except Exception:return None
+
+@app.get('/api/admin/data/status')
+async def data_status(role=Depends(admin_only)):
+    out=[]
+    for key,g in DATA_GROUPS.items():
+        tabs=[{'tab':n,'rows':await asyncio.to_thread(_tab_rows,n,h)} for n,h in g['tabs']]
+        out.append({'group':key,'label':g['label'],'tabs':tabs,'rows':sum(t['rows'] or 0 for t in tabs)})
+    return {'groups':out,'confirmation':DATA_CONFIRM}
+
+def _backup_and_clear(name,headers,stamp):
+    ws=worksheet(sheet(),name,headers)
+    values=_quota_call(lambda: ws.get_all_values())
+    if len(values)<=1:return {'tab':name,'cleared':0,'backup':''}
+    width=max(len(r) for r in values)
+    title=f'Backup {name} {stamp}'[:99]
+    book=sheet()
+    bk=_quota_call(lambda: book.add_worksheet(title=title,rows=len(values)+5,cols=max(width,len(headers))))
+    _quota_call(lambda: bk.update(range_name='A1',values=values,value_input_option='RAW'))
+    copied=_quota_call(lambda: bk.get_all_values())
+    if len(copied)<len(values):raise RuntimeError(f'Backup of {name} could not be verified; {name} was not cleared')
+    from gspread.utils import rowcol_to_a1
+    _quota_call(lambda: ws.batch_clear([f'A2:{rowcol_to_a1(len(values),width)}']))
+    if [str(h).strip() for h in values[0][:len(headers)]]!=headers:
+        _quota_call(lambda: ws.update(range_name='A1',values=[headers],value_input_option='RAW'))
+    return {'tab':name,'cleared':len(values)-1,'backup':title}
+
+@app.post('/api/admin/data/clear')
+async def data_clear(body:DataClear,authorization: str | None = Header(None),role=Depends(admin_only)):
+    if body.confirmation!=DATA_CONFIRM:raise HTTPException(400,f'Type {DATA_CONFIRM} to confirm')
+    unknown=[g for g in body.groups if g not in DATA_GROUPS]
+    if unknown:raise HTTPException(400,f'Unknown data group: {", ".join(unknown)}')
+    if lock.locked() or state['running']:raise HTTPException(409,'A replacement or sync is running; try again when it finishes')
+    actor=_verify((authorization or '').removeprefix('Bearer ').strip()).get('email','')
+    async with lock:
+        await require_reconciled()
+        if 'journal' in body.groups:
+            pending=[j for j in (await asyncio.to_thread(queue_snapshot)) if j.get('status') in ('pending','processing')]
+            if pending:raise HTTPException(409,'Replacements are queued; wait until the queue is empty')
+        stamp=datetime.now(IST).strftime('%Y-%m-%d %H%M')
+        done=[]
+        try:
+            for g in body.groups:
+                for n,h in DATA_GROUPS[g]['tabs']:
+                    done.append(await asyncio.to_thread(_backup_and_clear,n,h,stamp))
+        finally:
+            invalidate_snapshots(*[n for g in DATA_GROUPS.values() for n,_ in g['tabs']],'inventory','queue_display')
+            _LIVE_CACHE['data']=None
+            detail='; '.join(f"{d['tab']}={d['cleared']}" for d in done)
+            try:await asyncio.to_thread(append_event,'ADMIN','DATA_CLEARED',result='AUDIT',details=f'by {actor}: {detail}; backups "Backup <tab> {stamp}"')
+            except Exception:log.exception('Data clear journal entry failed')
+            await asyncio.to_thread(platform.audit,actor,'DATA_CLEARED',','.join(body.groups),detail)
+    return {'ok':True,'cleared':done,'backup_suffix':stamp}
 
 if BASE.exists():
     app.mount('/assets',StaticFiles(directory=BASE/'assets'),name='assets')

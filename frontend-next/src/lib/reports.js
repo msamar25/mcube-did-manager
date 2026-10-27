@@ -72,3 +72,32 @@ export function runReport(dataset, rows, cfg = {}) {
   }
   return { rows: out, groups };
 }
+
+// ---- import parsing: pasted text or an uploaded file → agent numbers and emails ----
+// Emails are found by their @domain.tld; the remaining digits become 10-digit mobile numbers:
+// "+91 98765 43210", "09876543210", "98765432109123456789" (two numbers run together) are all understood.
+const EMAIL = /[a-z0-9._%+'-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/gi;
+export function parseImport(text = '') {
+  const emails = [...String(text).matchAll(EMAIL)].map((m) => m[0].toLowerCase());
+  const rest = String(text).replace(EMAIL, ' ');
+  // digit groups; short groups next to each other (e.g. "98765 43210") are joined until they reach 10 digits
+  const groups = rest.match(/\d+/g) || [];
+  const merged = [];
+  let cur = '';
+  for (const g of groups) {
+    // join only pieces of one number ("+91 98765 43210" → 919876543210), never two numbers
+    if (cur && cur.length < 10 && cur.length + g.length <= 12) cur += g; else { if (cur) merged.push(cur); cur = g; }
+  }
+  if (cur) merged.push(cur);
+  const phones = [], invalid = [];
+  for (let d of merged) {
+    if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
+    else if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+    else if (d.length === 13 && d.startsWith('091')) d = d.slice(3);
+    if (d.length % 10 === 0) for (let i = 0; i < d.length; i += 10) phones.push(d.slice(i, i + 10));
+    else invalid.push(d);
+  }
+  const seen = new Set(), entries = [];
+  for (const e of [...phones, ...emails]) if (!seen.has(e)) { seen.add(e); entries.push(e); }
+  return { entries, invalid, duplicates: phones.length + emails.length - entries.length };
+}

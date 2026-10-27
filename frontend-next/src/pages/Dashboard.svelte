@@ -1,5 +1,6 @@
 <script>
-  import { db, opStats, totals, flowCounts, poolActivity } from '../lib/store.svelte.js';
+  import { db, opStats, totals, flowCounts, poolActivity, storyQueue, pulse } from '../lib/store.svelte.js';
+  import LiveBadge from '../components/LiveBadge.svelte';
   import { poolChart } from '../lib/charts.js';
   import { rangePool } from '../lib/range.svelte.js';
   import RangePicker from '../components/RangePicker.svelte';
@@ -43,6 +44,8 @@
   const flowMax = Math.max(...stages.map((s) => flow[s.k]));
   let sel = $state(null), view = $state('3d'), story = $state(null), riskOpen = $state(false), sceneRef = $state(), mobile = $state(false);
   let sd = $derived(supportData(db.requests));
+  // real tickets for the 3D hub: live changes first, then the most recently active tickets
+  let stories = $derived((pulse.events.length, db.requests, storyQueue()));
   onMount(() => { const mq = matchMedia('(max-width: 760px)'); const f = () => (mobile = mq.matches); f(); mq.addEventListener('change', f); return () => mq.removeEventListener('change', f); });
   function onselect(x) { sel = x?.type && x.type !== 'none' ? x : null; }
   const zoneReq = (k) => db.requests.filter((r) => TICKET_ZONES[k].statuses.includes(r.status));
@@ -55,7 +58,7 @@
     if (sel.type === 'agents') return { icon: 'users', title: 'Agents', sub: 'Raise DID replacement requests', stats: [['Directory', n(t.agents)], ['With DID', n(t.active)], ['Requests 24h', n(last24)], ['Replaced 24h', n(doneToday)]], cta: 'Agent 360°', go: () => go('command', 'agent') };
     if (sel.type === 'pool') return { icon: 'pool', title: 'DID Pool', sub: 'FIFO allocation', stats: [['Available', n(t.pool)], ['Operators', ops.length]], cta: 'Pool intelligence', go: () => go('command', 'pool') };
     if (sel.type === 'flow') return { icon: 'swap', title: 'Replacement flow', sub: 'One agent at a time, verified', stats: [['Pending', n(flow.pending)], ['Processing', n(flow.processing)], ['Completed', n(flow.completed)], ['Failed', n(flow.failed)]], cta: 'Replacement queue', go: () => go('command', 'replacement') };
-    if (sel.type === 'team') return { icon: 'users', title: 'Team huddle', sub: 'Illustrative collaboration area', stats: [['Teams', n(db.insights?.teams?.length)], ['Requests', n(db.requests.length)]], cta: 'Team performance', go: () => go('analytics', 'teams') };
+    if (sel.type === 'team') return { icon: 'users', title: 'Team huddle', sub: 'Team area', stats: [['Teams', n(db.insights?.teams?.length)], ['Requests', n(db.requests.length)]], cta: 'Team performance', go: () => go('analytics', 'teams') };
     return null;
   });
 </script>
@@ -64,12 +67,12 @@
   <section class="hero" class:m={mobile}>
     {#if !mobile}
       <div class="scene-wrap">
-        {#if view === '3d'}<SupportScene bind:this={sceneRef} data={sd} selected={sel} {onselect} onstep={(x) => (story = x)} reserve=".hero-ui" />
+        {#if view === '3d'}<SupportScene bind:this={sceneRef} data={sd} story={stories} selected={sel} {onselect} onstep={(x) => (story = x)} reserve=".hero-ui" />
         {:else}<div class="map2d"><SupportMap data={sd} selected={sel} onpick={onselect} /></div>{/if}
       </div>
     {/if}
     <div class="hero-ui greet glass">
-      <div><span class="eyebrow">{today}</span><h1>{greet}, {session.name.split(' ')[0]}</h1><p>{n(sd.open)} open tickets · synced {ago(db.lastSync)}</p>{#if !mobile && view === '3d'}<span class="illus">Illustrative animation · not live cases</span>{/if}</div>
+      <div><span class="eyebrow">{today}</span><h1>{greet}, {session.name.split(' ')[0]}</h1><p>{n(sd.open)} open tickets · synced {ago(db.lastSync)}</p><LiveBadge /></div>
       <div class="row"><button class="btn btn-primary btn-sm" onclick={() => go('requests', 'queue')}><Icon name="inbox" size={13} />Support requests</button><button class="btn btn-sm" onclick={() => go('command', '3d')}><Icon name="cube" size={13} />DID Command Center</button></div>
     </div>
     {#if mobile}<div class="hero-ui mmap"><SupportMap data={sd} selected={sel} onpick={onselect} compact /></div>{/if}
@@ -93,7 +96,7 @@
       <div class="hero-ui tools">
         <div class="seg" role="tablist" aria-label="Hub view"><button class:on={view === '3d'} onclick={() => (view = '3d')}>3D</button><button class:on={view === '2d'} onclick={() => (view = '2d')}>2D</button></div>
         {#if view === '3d'}<button class="btn btn-sm" onclick={() => { sel = null; sceneRef?.reset(); }}><Icon name="reset" size={13} />Reset view</button>{/if}
-        {#if story && view === '3d'}<span class="story" class:fail={story.failed && story.phase === 3}><i></i>{story.step}</span>{/if}
+        {#if story && view === '3d'}<span class="story" class:fail={story.failed && story.phase === 3} class:live={story.live}><i></i>{story.live ? 'Just now · ' : ''}{story.step}{#if story.ticket?.agent_name}<small> · {story.ticket.agent_name}</small>{/if}</span>{/if}
       </div>
     {/if}
     {#if selInfo}
@@ -174,6 +177,7 @@
   .tools > * { pointer-events: auto; }
   .tools .seg, .tools .btn { box-shadow: var(--shadow-sm); }
   .story { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 650; color: var(--ink-2); background: rgba(255,255,255,.9); padding: 6px 11px; border-radius: 99px; box-shadow: var(--shadow-sm); }
+  .story small { color: var(--muted); font-weight: 550; } .story.live { box-shadow: 0 0 0 2px #abefc6, var(--shadow-sm); } .story.live i { background: #12b76a; }
   .story i { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); animation: pulse 1.6s infinite; } .story.fail i { background: var(--bad); }
   .illus { display: inline-block; margin-top: 4px; font-size: 10px; font-weight: 650; color: #6d3fd1; background: rgba(243,236,255,.92); padding: 2px 7px; border-radius: 6px; }
   @media (max-width: 1100px) { .hero:not(.m) { min-height: 600px; } .hero:not(.m) .greet .row { display: none; } }

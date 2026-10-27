@@ -1,7 +1,8 @@
 // Replacement flow as a 3D ticket board (replaces the floating "packets" status path).
 // Four standing glass boards — Incoming, In progress, Resolved, Failed — each drawn like a column of a
 // ticketing system: coloured header with the live count and the newest real tickets as cards.
-// One ILLUSTRATIVE ticket card glides from board to board to show the lifecycle; the boards' contents are real.
+// A ticket card glides from board to board: the most recent REAL tickets (live changes first), each going only
+// as far as its real status. Without data it shows the generic lifecycle.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
@@ -49,12 +50,19 @@ function drawBoard(ctx, col, count, tickets) {
   if (count > shown.length) { g.fillStyle = col.color; g.font = '700 26px Inter, system-ui, sans-serif'; g.textAlign = 'center'; g.fillText(`+${f(count - shown.length)} more`, CW / 2, CH - 40); g.textAlign = 'left'; }
 }
 
-function ticketTexture() {
-  const c = document.createElement('canvas'); c.width = 256; c.height = 150; const g = c.getContext('2d');
-  rr(g, 4, 4, 248, 142, 22); g.fillStyle = '#ffffff'; g.fill(); g.lineWidth = 4; g.strokeStyle = '#f26b1d'; g.stroke();
-  rr(g, 4, 4, 18, 142, 9); g.fillStyle = '#f26b1d'; g.fill();
-  g.fillStyle = '#141a26'; g.font = '800 34px Inter, system-ui, sans-serif'; g.fillText('TICKET', 42, 58);
-  g.fillStyle = '#9aa3b2'; for (const [y, w] of [[86, 170], [112, 120]]) { rr(g, 42, y, w, 12, 6); g.fill(); }
+function ticketTexture(item, color = '#f26b1d') {
+  const c = document.createElement('canvas'); c.width = 320; c.height = 180; const g = c.getContext('2d');
+  rr(g, 4, 4, 312, 172, 24); g.fillStyle = '#ffffff'; g.fill(); g.lineWidth = 5; g.strokeStyle = color; g.stroke();
+  rr(g, 4, 4, 20, 172, 10); g.fillStyle = color; g.fill();
+  g.fillStyle = '#141a26'; g.textBaseline = 'middle';
+  if (item) {
+    g.font = '800 30px ui-monospace, SFMono-Regular, Menlo, monospace'; g.fillText(fit(g, item.ticket_no || 'TICKET', 270), 42, 52);
+    g.font = '600 26px Inter, system-ui, sans-serif'; g.fillStyle = '#3b4456'; g.fillText(fit(g, item.agent_name || item.agent_number || '', 266), 42, 98);
+    if (item.live) { rr(g, 42, 126, 118, 34, 17); g.fillStyle = '#12b76a'; g.fill(); g.fillStyle = '#fff'; g.font = '700 20px Inter, system-ui, sans-serif'; g.fillText('LIVE', 72, 144); }
+  } else {
+    g.font = '800 34px Inter, system-ui, sans-serif'; g.fillText('TICKET', 42, 58);
+    g.fillStyle = '#9aa3b2'; for (const [y, w] of [[96, 200], [126, 140]]) { rr(g, 42, y, w, 14, 7); g.fill(); }
+  }
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
 }
 
@@ -114,17 +122,31 @@ export function buildTicketBoard(s, ptsIn) {
   s.updateBoards(s.data);
 
   // ILLUSTRATIVE ticket: Incoming → In progress → Resolved (every 3rd loop → Failed), ~12 s per loop
-  const tk = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.88), new THREE.MeshBasicMaterial({ map: ticketTexture(), transparent: true, toneMapped: false, side: THREE.DoubleSide }));
+  const tk = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.0), new THREE.MeshBasicMaterial({ map: ticketTexture(), transparent: true, toneMapped: false, side: THREE.DoubleSide }));
   tk.castShadow = false; s.scene.add(tk);
   const halo = new THREE.Mesh(new THREE.CircleGeometry(0.9, 32), new THREE.MeshBasicMaterial({ color: '#ffb27a', transparent: true, opacity: 0.25, toneMapped: false, depthWrite: false })); s.scene.add(halo);
   const LOOP = 12;
   const arc = (a, b) => { const mid = a.clone().lerp(b, 0.5); mid.y = Math.max(a.y, b.y) + 2.2; return new THREE.QuadraticBezierCurve3(a, mid, b); };
-  s.updaters.push((t) => {
-    const loop = Math.floor(t / LOOP), lt = t - loop * LOOP, failed = loop % 3 === 2;
+  // real story: s.setStory([{ ticket_no, agent_name, stage, live }]); stage → board index
+  const BOARD = { incoming: 0, hub: 0, progress: 1, resolved: 2, failed: 3 };
+  let shown = null;
+  s.setStory = (items) => {
+    const key = (items || []).map((x) => x.ticket_no + ':' + x.stage).join('|'); if (key === s._storyKey) return;
+    const head = items?.[0] ? items[0].ticket_no + ':' + items[0].stage : '';
+    if ((items?.[0]?.live && head !== s._storyHead) || s._storyT0 === undefined) s._storyT0 = s.time ?? 0;
+    s._storyKey = key; s._storyHead = head; s.story = items?.length ? items : null;
+  };
+  s.updaters.push((t0) => {
+    const rt = s.story ? t0 - (s._storyT0 || 0) : t0;
+    const loop = Math.max(0, Math.floor(rt / LOOP)); const lt = rt - loop * LOOP, t = t0;
+    const item = s.story ? s.story[loop % s.story.length] : null;
+    if (item !== shown) { shown = item; tk.material.map?.dispose(); tk.material.map = ticketTexture(item, item ? COLUMNS[BOARD[item.stage] ?? 0].color : '#f26b1d'); tk.material.needsUpdate = true; }
+    const failed = item ? item.stage === 'failed' : loop % 3 === 2;
     const A = s.boards.map((b) => b.anchor.clone().add(new THREE.Vector3(0, 0, 0.9)));
-    const end = failed ? 3 : 2;
+    const end = item ? (BOARD[item.stage] ?? 0) : failed ? 3 : 2;
     let pos, at = -1;
-    if (lt < 2) { pos = A[0]; at = 0; }
+    if (lt < 2 || end === 0) { pos = A[0]; at = 0; }
+    else if (end === 1 && lt >= 4.5) { pos = A[1]; at = 1; }
     else if (lt < 4.5) pos = arc(A[0], A[1]).getPointAt(ease((lt - 2) / 2.5));
     else if (lt < 6.5) { pos = A[1]; at = 1; }
     else if (lt < 9) pos = arc(A[1], A[end]).getPointAt(ease((lt - 6.5) / 2.5));

@@ -4,6 +4,9 @@
   import { db } from '../lib/store.svelte.js';
   import { DATASETS, TEMPLATES, OPS, runReport, display } from '../lib/reports.js';
   import { listReports, saveReport, deleteReport } from '../lib/data/platform.js';
+  import { can } from '../lib/session.svelte.js';
+  // the change log (audit) dataset needs the Audit log permission
+  const dsOk = (k) => k !== 'logs' || can.audit();
   import { getLogsSince, historyFrom } from '../lib/data/source.js';
   import { rangeBounds, daysNeeded } from '../lib/calc.js';
   import { n } from '../lib/format.js';
@@ -62,17 +65,17 @@
   <aside class="panel panel-pad rlist">
     <button class="btn btn-primary" onclick={() => { rep = blank(); dirty = false; }}><Icon name="plus" size={14} />New report</button>
     <div class="lbl">Saved</div>
-    {#each saved as r (r.id)}<button class="it" class:on={rep.id === r.id} onclick={() => load(r)}><Icon name="file" size={14} /><span><b>{r.name}</b><small>{DATASETS[r.dataset]?.label}{r.shared ? ' · shared' : ''}{r.mine ? '' : ` · ${r.owner}`}</small></span></button>
+    {#each saved.filter((r) => dsOk(r.dataset)) as r (r.id)}<button class="it" class:on={rep.id === r.id} onclick={() => load(r)}><Icon name="file" size={14} /><span><b>{r.name}</b><small>{DATASETS[r.dataset]?.label}{r.shared ? ' · shared' : ''}{r.mine ? '' : ` · ${r.owner}`}</small></span></button>
     {:else}<div class="muted sm">None yet</div>{/each}
     <div class="lbl">Templates</div>
-    {#each TEMPLATES as tp}<button class="it" onclick={() => load({ ...tp, mine: false })}><Icon name="sparkles" size={14} /><span><b>{tp.name}</b><small>{DATASETS[tp.dataset].label}</small></span></button>{/each}
+    {#each TEMPLATES.filter((tp) => dsOk(tp.dataset)) as tp}<button class="it" onclick={() => load({ ...tp, mine: false })}><Icon name="sparkles" size={14} /><span><b>{tp.name}</b><small>{DATASETS[tp.dataset].label}</small></span></button>{/each}
   </aside>
 
   <section class="main">
     <div class="panel panel-pad builder">
       <div class="row1">
         <label class="field">Report name<input class="input" bind:value={rep.name} oninput={touch} placeholder="Untitled report" maxlength="80" /></label>
-        <label class="field">Data<select class="select" value={rep.dataset} onchange={(e) => pickDataset(e.currentTarget.value)}>{#each Object.entries(DATASETS) as [k, v]}<option value={k}>{v.label}</option>{/each}</select></label>
+        <label class="field">Data<select class="select" value={rep.dataset} onchange={(e) => pickDataset(e.currentTarget.value)}>{#each Object.entries(DATASETS).filter(([k]) => dsOk(k)) as [k, v]}<option value={k}>{v.label}</option>{/each}</select></label>
         {#if ds.date}
           <div class="field">Date range
             <div class="rg"><select class="select" bind:value={rep.config.range.preset} onchange={touch}>{#each RANGES as [k, l]}<option value={k}>{l}</option>{/each}</select>

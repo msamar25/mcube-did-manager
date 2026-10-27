@@ -132,4 +132,12 @@ t('custom report: range, filters, group, sort', () => {
   const r2 = R.runReport('requests', rows, { filters: [{ field: 'status', op: 'in', value: 'pending, completed' }, { field: 'call_count', op: 'gte', value: '2' }] });
   assert.deepEqual(r2.rows.map((x) => x.ticket_no), ['A', 'C']);
 });
+t('import paste: emails and 10-digit numbers split automatically', () => {
+  const p = (x) => R.parseImport(x);
+  assert.deepEqual(p('9876543210 9123456789,asha@u-next.com;+91 98765 43211').entries, ['9876543210', '9123456789', '9876543211', 'asha@u-next.com']);
+  assert.deepEqual(p('98765432109123456789').entries, ['9876543210', '9123456789']);
+  assert.deepEqual(p('agent: 098765 43212 | +919876543213').entries, ['9876543212', '9876543213']);
+  const q = p('ravi.k@onlinemanipal.com12345 9876543210 9876543210');
+  assert.deepEqual(q.entries, ['9876543210', 'ravi.k@onlinemanipal.com']); assert.deepEqual(q.invalid, ['12345']); assert.equal(q.duplicates, 1);
+});
 console.log('all tests passed');

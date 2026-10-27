@@ -9,7 +9,8 @@ export const ROLE_LABEL = { admin: 'Administrator', operator: 'Operator', member
 
 // ---------- preview sample (labelled, in memory) ----------
 const CATALOG = [
-  { id: 'did', name: 'DID Replacement', description: 'DID inventory, FIFO replacement, support requests', status: 'live', roles: ['admin', 'operator'], color: '#f26b1d', icon: 'swap' },
+  { id: 'did', name: 'DID Replacement', description: 'DID inventory, FIFO replacement, support requests', status: 'live', roles: ['admin', 'operator'], color: '#f26b1d', icon: 'swap',
+    permissions: [{ id: 'settings', label: 'Settings & data setup', roles: ['admin'] }, { id: 'credentials', label: 'MCube credentials', roles: ['admin'] }, { id: 'audit', label: 'Audit log', roles: ['admin'] }, { id: 'replace', label: 'Run DID replacements & reviews', roles: ['admin', 'operator'] }, { id: 'reports', label: 'Reports & exports', roles: ['admin', 'operator'] }] },
   { id: 'users', name: 'User Management', description: 'Users, app access, global and app settings', status: 'live', roles: ['admin'], color: '#2a6fdb', icon: 'users' },
   { id: 'deb', name: 'DEB Operations', description: 'In development', status: 'planned', roles: ['admin', 'member'], color: '#7a5af8', icon: 'layers' }
 ];
@@ -21,7 +22,7 @@ const PV = {
     { email: 'ops.lead@example-unext.in', name: 'Ops Lead', status: 'active', super_admin: false, source: 'user_management', apps: { did: 'admin', deb: 'admin' }, has_pin: true, updated_utc: now(), updated_by: 'admin@example-unext.in' },
     { email: 'former@example-unext.in', name: 'Former Staff', status: 'disabled', super_admin: false, source: 'user_management', apps: { did: 'operator' }, has_pin: true, updated_utc: now(), updated_by: 'admin@example-unext.in' }
   ],
-  settings: { global: { org_name: 'UNext', session_hours: '8', allowed_email_domains: '', launcher_notice: '' }, apps: { did: { enabled: 'true', maintenance_message: '' }, users: { enabled: 'true', maintenance_message: '' }, deb: { enabled: 'true', maintenance_message: '' } } },
+  settings: { global: { org_name: 'UNext', session_hours: '8', single_session: 'true', allowed_email_domains: '', launcher_notice: '' }, apps: { did: { enabled: 'true', maintenance_message: '', 'perm:settings': 'admin', 'perm:credentials': 'admin', 'perm:audit': 'admin', 'perm:replace': 'admin,operator', 'perm:reports': 'admin,operator' }, users: { enabled: 'true', maintenance_message: '' }, deb: { enabled: 'true', maintenance_message: '' } } },
   audit: [{ time_ist: now(), actor: 'admin@example-unext.in', action: 'USER_CREATED', target: 'ops.lead@example-unext.in', details: 'status=active; apps=did:admin,deb:admin' }],
   reports: []
 };
@@ -29,7 +30,7 @@ const wait = (v, ms = 250) => new Promise((r) => setTimeout(() => r(structuredCl
 
 export function previewMe(role) {
   const admin = role === 'admin';
-  const apps = CATALOG.filter((a) => admin || a.id === 'did').map((a) => ({ ...a, role: a.status === 'planned' ? '' : a.id === 'did' ? (admin ? 'admin' : 'operator') : 'admin', enabled: PV.settings.apps[a.id]?.enabled !== 'false', maintenance_message: PV.settings.apps[a.id]?.maintenance_message || '' }));
+  const apps = CATALOG.filter((a) => admin || a.id === 'did').map((a) => ({ ...a, permissions: (a.permissions || []).filter((p) => p.roles.includes(admin ? 'admin' : 'operator')).map((p) => p.id), role: a.status === 'planned' ? '' : a.id === 'did' ? (admin ? 'admin' : 'operator') : 'admin', enabled: PV.settings.apps[a.id]?.enabled !== 'false', maintenance_message: PV.settings.apps[a.id]?.maintenance_message || '' }));
   return { email: admin ? 'admin@example-unext.in' : 'operator1@example-unext.in', name: admin ? 'Prasad Shankarwar' : 'Operator One', super_admin: admin, can_manage_users: admin, default_app: '', apps, role: admin ? 'admin' : 'operator', org_name: PV.settings.global.org_name, launcher_notice: PV.settings.global.launcher_notice, session_hours: 8 };
 }
 

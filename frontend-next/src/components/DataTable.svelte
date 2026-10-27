@@ -4,6 +4,10 @@
   // Column options: value(r) for sort/search, search(r) extra searchable text, lock: true = cannot be hidden,
   // export(r) value written to CSV (defaults to value(r) / the raw field). Export = current filter + sort.
   import { downloadCsv } from '../lib/format.js';
+  import { route } from '../lib/router.svelte.js';
+  import { can } from '../lib/session.svelte.js';
+  // exports inside the DID app need its 'Reports & exports' permission
+  let canExport = $derived(route.app !== 'did' || can.reports());
   let { exportName = '', rows = [], columns = [], cell, pageSize = 10, onrow, rowKey = (r, i) => i, selectable = false, selected = $bindable([]), canSelect = () => true, empty = 'No records match the current filters.', dense = false, height, id = '', toolbar = true, placeholder = 'Search', tools } = $props();
   let sortKey = $state(null), sortDir = $state(1), page = $state(1), q = $state(''), field = $state('all'), colMenu = $state(false), expMenu = $state(false);
   const storeKey = () => (id ? 'next_cols:' + id : '');
@@ -51,7 +55,7 @@
       {@render tools?.()}
       <div class="spacer"></div>
       {#if q}<span class="muted cnt">{filtered.length.toLocaleString('en-IN')} match{filtered.length === 1 ? '' : 'es'}</span>{/if}
-      <div class="cm">
+      {#if canExport}<div class="cm">
         <button class="btn btn-sm" disabled={!sorted.length} onclick={() => { expMenu = !expMenu; colMenu = false; }} aria-expanded={expMenu}><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></svg>Export</button>
         {#if expMenu}
           <div class="cmenu glass" role="menu">
@@ -59,7 +63,7 @@
             <button class="mi" onclick={() => exportRows(true)}>All columns · {sorted.length.toLocaleString('en-IN')} rows</button>
           </div>
         {/if}
-      </div>
+      </div>{/if}
       <div class="cm">
         <button class="btn btn-sm" onclick={() => { colMenu = !colMenu; expMenu = false; }} aria-expanded={colMenu}><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16" /></svg>Columns{#if hidden.length}<span class="hc">{columns.length - shown.length} hidden</span>{/if}</button>
         {#if colMenu}

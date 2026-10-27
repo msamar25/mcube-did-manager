@@ -1,4 +1,5 @@
 <script>
+  import { can } from '../lib/session.svelte.js';
   import { db } from '../lib/store.svelte.js';
   import { n, downloadCsv } from '../lib/format.js';
   import PageHead from '../components/PageHead.svelte';
@@ -13,8 +14,8 @@
   let rows = $derived(teams.filter((t) => mgr === 'all' || t.manager === mgr));
   const columns = [{ key: 'team_lead', label: 'Team lead', strong: true }, { key: 'manager', label: 'Manager' }, { key: 'agents', label: 'Agents w/ requests', num: true }, { key: 'requests', label: 'Requests', num: true }, { key: 'calls', label: 'Calls', num: true }, { key: 'completed', label: 'Completed', num: true }, { key: 'rate', label: 'Completion', num: true, custom: true }];
 </script>
-<PageHead title="Team Performance" eyebrow="Analytics">
-  {#snippet actions()}<button class="btn" onclick={() => downloadCsv(teams, 'team-performance.csv')}><Icon name="download" size={14} />Export</button>{/snippet}
+<PageHead title="Team Insights" eyebrow="Analytics">
+  {#snippet actions()}{#if can.reports()}<button class="btn" onclick={() => downloadCsv(teams, 'team-performance.csv')}><Icon name="download" size={14} />Export</button>{/if}{/snippet}
 </PageHead>
 <div class="layout">
   <div class="panel panel-pad">

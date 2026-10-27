@@ -1,4 +1,5 @@
 <script>
+  import { can } from '../lib/session.svelte.js';
   import { db } from '../lib/store.svelte.js';
   import { range, bounds } from '../lib/range.svelte.js';
   import { perBucket } from '../lib/calc.js';
@@ -25,7 +26,7 @@
 </script>
 
 <PageHead title="Request Insights" eyebrow="Analytics">
-  {#snippet actions()}<button class="btn" onclick={() => downloadCsv(ins.agents, 'agent-request-insights.csv')}><Icon name="download" size={14} />Export</button>{/snippet}
+  {#snippet actions()}{#if can.reports()}<button class="btn" onclick={() => downloadCsv(ins.agents, 'agent-request-insights.csv')}><Icon name="download" size={14} />Export</button>{/if}{/snippet}
 </PageHead>
 
 <div class="kpis">

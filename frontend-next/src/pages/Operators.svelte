@@ -1,4 +1,5 @@
 <script>
+  import { can } from '../lib/session.svelte.js';
   import { db, opStats, trend } from '../lib/store.svelte.js';
   import { trendChart } from '../lib/charts.js';
   import { rangeTrend } from '../lib/range.svelte.js';
@@ -30,7 +31,7 @@
 <PageHead title="Operator Analytics" eyebrow="Command Center">
   {#snippet actions()}
     <select class="select" bind:value={focus} aria-label="Operator"><option value="all">All operators</option>{#each ops as o}<option value={o.key}>{o.key}</option>{/each}</select>
-    <button class="btn" onclick={() => downloadCsv(rows.map(({ key, label, total, active, pool, inactive, utilization, duplicates, replacements, open }) => ({ operator: key, label, total, active, pool, inactive, utilization, duplicates, replacements, open_requests: open })), 'operator-analytics.csv')}><Icon name="download" size={14} />Export</button>
+    {#if can.reports()}<button class="btn" onclick={() => downloadCsv(rows.map(({ key, label, total, active, pool, inactive, utilization, duplicates, replacements, open }) => ({ operator: key, label, total, active, pool, inactive, utilization, duplicates, replacements, open_requests: open })), 'operator-analytics.csv')}><Icon name="download" size={14} />Export</button>{/if}
   {/snippet}
 </PageHead>
 

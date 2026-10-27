@@ -1,7 +1,7 @@
 <script>
   // Lazy-loads the UNext L1 Support Hub 3D scene (Three.js is only downloaded here).
   import { onMount } from 'svelte';
-  let { data, selected = null, onselect = () => {}, onstep = () => {}, reserve = '', paused = false, onstatus = () => {} } = $props();
+  let { data, story = null, selected = null, onselect = () => {}, onstep = () => {}, reserve = '', paused = false, onstatus = () => {} } = $props();
   let host, scene = $state(null), status = $state('loading'), err = $state('');
   onMount(() => {
     let dead = false;
@@ -16,6 +16,7 @@
     return () => { dead = true; scene?.dispose(); scene = null; if (window.__hub) window.__hub = null; };
   });
   $effect(() => { if (scene && data) scene.setData(data); });
+  $effect(() => { if (scene) scene.setStory(story); });
   $effect(() => { if (scene) scene.select(selected); });
   $effect(() => { if (scene) scene.paused = paused; });
   export function reset() { scene?.resetView(); }

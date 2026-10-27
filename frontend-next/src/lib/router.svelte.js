@@ -17,20 +17,22 @@ export const NAV = [
   ] },
   { id: 'analytics', label: 'Analytics', icon: 'chart', pages: [
     { id: 'insights', label: 'Request Insights', icon: 'chart' },
-    { id: 'teams', label: 'Team Performance', icon: 'users' }
+    { id: 'teams', label: 'Team Insights', icon: 'users' }
   ] },
   { id: 'reports', label: 'Reports', icon: 'file', pages: [
-    { id: 'audit', label: 'Audit Log', icon: 'log' },
-    { id: 'history', label: 'Replacement History', icon: 'history' },
-    { id: 'exports', label: 'Custom Reports', icon: 'filedown' }
+    { id: 'audit', label: 'Audit Log', icon: 'log', perm: 'audit' },
+    { id: 'history', label: 'Replacement History', icon: 'history', perm: 'reports' },
+    { id: 'exports', label: 'Custom Reports', icon: 'filedown', perm: 'reports' }
   ] },
-  { id: 'settings', label: 'Settings', icon: 'settings', admin: true, pages: [
+  // perm = DID permission needed to see the section / page (set per role in App Settings, per user in Users & Access)
+  { id: 'settings', label: 'Settings', icon: 'settings', perm: 'settings', pages: [
     { id: 'intake', label: 'Request Intake', icon: 'inbox' },
     { id: 'safety', label: 'Replacement Safety', icon: 'shield' },
     { id: 'notifications', label: 'Call Notifications', icon: 'phone' },
     { id: 'email', label: 'Email', icon: 'mail' },
     { id: 'employees', label: 'Employee Sync', icon: 'users' },
-    { id: 'credentials', label: 'MCube Credentials', icon: 'key' },
+    { id: 'data', label: 'Data Setup', icon: 'server' },
+    { id: 'credentials', label: 'MCube Credentials', icon: 'key', perm: 'credentials' },
     { id: 'advanced', label: 'Advanced & Access', icon: 'sliders' }
   ] }
 ];

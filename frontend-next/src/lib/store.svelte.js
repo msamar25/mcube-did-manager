@@ -47,6 +47,7 @@ export async function load() {
 export function resetData() {
   Object.assign(db, { loaded: false, loading: false, error: '', inventory: [], requests: [], logs: [], jobs: [], notifications: [], employees: [], insights: null, history: [], directory: null, lastSync: '' });
   slowAt = 0;
+  Object.assign(pulse, { at: 0, sig: '', events: [], batch: null, error: '' });
 }
 
 // ---- notifications: read state is per browser + user (the log itself is never changed) ----
@@ -67,15 +68,56 @@ export const live = $state({ every: api.LIVE ? 120 : 60, last: 0, busy: false, e
 export async function refresh(withSlow = false) {
   if (live.busy || db.loading || !db.loaded) return;
   live.busy = true;
-  try { Object.assign(db, await fetchAll({ withSlow })); live.last = Date.now(); live.error = ''; }
+  try { Object.assign(db, await fetchAll({ withSlow })); live.last = Date.now(); pulse.at = Date.now(); live.error = ''; }
   catch (e) { live.error = e?.message || 'Refresh failed'; }
   finally { live.busy = false; }
 }
+// ---- live ticket feed (every 20 s) ----
+// /api/live returns every request's status from one shared server read (cached 15 s). Changes since the
+// previous check become live events (shown by the 3D views); a finished replacement triggers a full refresh.
+export const pulse = $state({ at: 0, sig: '', busy: false, error: '', events: [], batch: null, every: 20 });
+const STAGE = { pending: 'incoming', review_required: 'hub', approved: 'hub', processing: 'progress', needs_reconciliation: 'progress', completed: 'resolved', failed: 'failed', rejected: 'failed' };
+export const stageOf = (status) => STAGE[status] || 'incoming';
+export async function pulseOnce() {
+  if (!api.LIVE || !db.loaded || pulse.busy || live.busy || db.loading) return;
+  pulse.busy = true;
+  try {
+    const r = await api.getLive(); if (!r) return;
+    pulse.at = Date.now(); pulse.error = ''; const wasRunning = pulse.batch?.running; pulse.batch = r.batch;
+    if (r.sig === pulse.sig) { if (wasRunning && !r.batch?.running) refresh(true); return; }
+    const first = !pulse.sig; pulse.sig = r.sig;
+    const old = new Map(db.requests.map((x) => [x.request_id, x]));
+    const opOf = new Map(db.inventory.map((i) => [String(i.did), i.operator]));
+    const evs = [], seen = new Set();
+    const merged = r.items.map(api.normReq).map((n) => {
+      seen.add(n.request_id);
+      const o = old.get(n.request_id);
+      if (!first && (!o || o.status !== n.status)) evs.push({ ticket_no: n.ticket_no, agent_name: n.agent_name, agent_number: n.agent_number, status: n.status, from: o?.status || '', at: Date.now(), live: true });
+      return { ...(o || {}), ...n, operator: o?.operator || opOf.get(String(n.current_did)) || '' };
+    });
+    if (evs.length) pulse.events = [...evs, ...pulse.events].slice(0, 20);
+    // keep the newest-first order the screens expect
+    db.requests = merged.sort((a, b) => (calc.parseTs(b.first_call_utc) || 0) - (calc.parseTs(a.first_call_utc) || 0));
+    if (evs.some((e) => ['completed', 'failed', 'needs_reconciliation'].includes(e.status)) || (wasRunning && !r.batch?.running)) refresh(true);
+  } catch (e) { pulse.error = e?.message || 'Live update failed'; }
+  finally { pulse.busy = false; }
+}
+// What the 3D views play: live changes (last 15 min) first, then the most recently active real tickets.
+export function storyQueue() {
+  const recent = pulse.events.filter((e) => Date.now() - e.at < 15 * 60e3);
+  const act = (r) => calc.parseTs(r.completed_utc || r.last_call_utc || r.first_call_utc) || 0;
+  const rest = [...db.requests].sort((a, b) => act(b) - act(a)).slice(0, 8)
+    .map((r) => ({ ticket_no: r.ticket_no, agent_name: r.agent_name, agent_number: r.agent_number, status: r.status, at: act(r), live: false }));
+  const seen = new Set(recent.map((e) => e.ticket_no));
+  return [...recent, ...rest.filter((x) => !seen.has(x.ticket_no))].slice(0, 10).map((x) => ({ ...x, stage: stageOf(x.status) }));
+}
+
 let timer = null;
 export function startAutoRefresh() {
   if (timer || typeof document === 'undefined') return;
   const due = () => !document.hidden && Date.now() - live.last >= live.every * 1000;
-  timer = setInterval(() => { if (due()) refresh(); }, 5000);
+  const pulseDue = () => !document.hidden && Date.now() - pulse.at >= pulse.every * 1000;
+  timer = setInterval(() => { if (due()) refresh(); else if (pulseDue()) pulseOnce(); }, 5000);
   document.addEventListener('visibilitychange', () => { if (due()) refresh(); });
 }
 export function stopAutoRefresh() { clearInterval(timer); timer = null; }

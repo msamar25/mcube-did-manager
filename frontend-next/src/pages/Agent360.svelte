@@ -1,4 +1,5 @@
 <script>
+  import { can } from '../lib/session.svelte.js';
   import { db } from '../lib/store.svelte.js';
   import { route, go } from '../lib/router.svelte.js';
   import { getAgentProfile } from '../lib/data/source.js';
@@ -39,7 +40,7 @@
 </script>
 
 <PageHead title="Agent 360°" eyebrow="Command Center">
-  {#snippet actions()}<button class="btn" onclick={() => downloadCsv(filtered.map((e) => ({ agent: e.agent_name, number: e.agent_number, email: e.email, team_lead: e.role4, manager: e.role5, status: STATUS[e.status]?.[1] || e.status, holds_did: e.hasDid ? 'yes' : 'no' })), `agents-${tab === 'active' ? 'active' : 'deactivated'}.csv`)}><Icon name="download" size={14} />Export list</button>{/snippet}
+  {#snippet actions()}{#if can.reports()}<button class="btn" onclick={() => downloadCsv(filtered.map((e) => ({ agent: e.agent_name, number: e.agent_number, email: e.email, team_lead: e.role4, manager: e.role5, status: STATUS[e.status]?.[1] || e.status, holds_did: e.hasDid ? 'yes' : 'no' })), `agents-${tab === 'active' ? 'active' : 'deactivated'}.csv`)}><Icon name="download" size={14} />Export list</button>{/if}{/snippet}
 </PageHead>
 
 <div class="layout">
@@ -66,8 +67,8 @@
         <span class="av" style="background:{avatarColor(e.agent_name || current)}">{e.agent_name ? initials(e.agent_name) : '#'}</span>
         <div class="who"><h2>{e.agent_name || current}</h2><div class="meta"><span><Icon name="phone" size={13} />{e.agent_number || current}</span>{#if e.email}<span><Icon name="mail" size={13} />{e.email}</span>{/if}{#if e.role4 || e.role5}<span><Icon name="users" size={13} />{[e.role4, e.role5].filter(Boolean).join(' · ')}</span>{/if}</div></div>
         <div class="row-wrap acts"><Badge status={STATUS[e.status]?.[0] || 'inactive'} label={STATUS[e.status]?.[1] || e.status} />
-          <button class="btn btn-sm" onclick={() => downloadCsv(timeline.map((x) => ({ time: x.t, event: x.title, detail: x.sub })), `agent-${e.agent_number}-timeline.csv`)}><Icon name="download" size={13} />Timeline</button>
-          <button class="btn btn-sm btn-primary" disabled={!profile.current.length} onclick={() => (reassign = true)}><Icon name="swap" size={13} />Replace DID</button></div>
+          {#if can.reports()}<button class="btn btn-sm" onclick={() => downloadCsv(timeline.map((x) => ({ time: x.t, event: x.title, detail: x.sub })), `agent-${e.agent_number}-timeline.csv`)}><Icon name="download" size={13} />Timeline</button>{/if}
+          <button class="btn btn-sm btn-primary" disabled={!profile.current.length || !can.reassign()} title={can.reassign() ? "" : "No replacement permission"} onclick={() => (reassign = true)}><Icon name="swap" size={13} />Replace DID</button></div>
       </div></div>
 
       {#if e.status !== 'active' && profile.current.length}<div class="note warn"><Icon name="alert" size={15} /><span>{STATUS[e.status]?.[1]} but still holds DID {profile.current.map((c) => c.did).join(', ')}.</span></div>{/if}

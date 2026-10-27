@@ -401,10 +401,29 @@ export class SupportHubScene {
     this.updaters.push((t) => this._story(t));
   }
   _arc(a, b, h = 6) { const mid = a.clone().lerp(b, 0.5); mid.y = Math.max(a.y, b.y) + h; return new THREE.QuadraticBezierCurve3(a, mid, b); }
+  // Real tickets (dashboard): setStory([{ ticket_no, agent_name, stage, status, at, live }]). The ticket travels
+  // only as far as its real stage (incoming → hub → progress → resolved / failed). Without a story (login
+  // backdrop) the original illustrative loop plays.
+  setStory(items) {
+    const key = (items || []).map((x) => x.ticket_no + ':' + x.stage).join('|');
+    if (key === this._storyKey) return;
+    const firstNew = items?.[0]?.live && items[0].ticket_no + ':' + items[0].stage !== this._storyHead;
+    this._storyKey = key; this._storyHead = items?.[0] ? items[0].ticket_no + ':' + items[0].stage : '';
+    this.story = items?.length ? items : null;
+    if (firstNew || this._storyT0 === undefined) this._storyT0 = this.t; // play a new live change right away
+  }
   _story(t) {
-    const loop = Math.floor(t / LOOP), lt = t - loop * LOOP;
-    const src = ADMISSIONS_ENABLED ? ['enquiries', 'guidance', 'application', 'payment'][loop % 4] : null;
-    const failed = loop % 3 === 2;
+    const real = this.story;
+    const rt = real ? t - (this._storyT0 || 0) : t;
+    const loop = Math.max(0, Math.floor(rt / LOOP));
+    let lt = rt - loop * LOOP;
+    const item = real ? real[loop % real.length] : null;
+    const src = !item && ADMISSIONS_ENABLED ? ['enquiries', 'guidance', 'application', 'payment'][loop % 4] : null;
+    const failed = item ? item.stage === 'failed' : loop % 3 === 2;
+    // hold the ticket at its real stage
+    const HOLD = { incoming: 3.59, hub: 8.19, progress: 10.19, resolved: 14.19, failed: 14.19 };
+    const realLt = lt;
+    if (item) lt = Math.min(lt, HOLD[item.stage] ?? 14.19);
     const Z = (k) => this.zones.get(k);
     const P = { src: src ? Z(src).top.clone().setY(3.4) : ENTRY.clone(), inc: Z('incoming').top.clone().setY(3.4), hub: this.heroAt.clone(), prog: Z('progress').top.clone().setY(3.4), end: Z(failed ? 'failed' : 'resolved').top.clone().setY(3.4) };
     const amber = new THREE.Color('#f59e0b'), blue = new THREE.Color('#3b82f6'), green = new THREE.Color('#22c55e'), red = new THREE.Color('#ef4444');
@@ -417,7 +436,9 @@ export class SupportHubScene {
     else if (lt < 12.4) { const k = ease((lt - 10.2) / 2.2); pos = this._arc(P.prog, P.end, 3.5).getPointAt(k); col = blue.clone().lerp(failed ? red : green, clamp01(k * 1.4)); step = failed ? 'Could not be resolved · Failed' : 'Resolved'; phase = 3; }
     else if (lt < 14.2) { pos = P.end.clone(); col = failed ? red : green; step = failed ? 'Could not be resolved · Failed' : 'Resolved'; phase = 3; }
     else { pos = P.end.clone(); col = failed ? red : green; vis = false; step = failed ? 'Could not be resolved · Failed' : 'Resolved'; phase = 3; }
-    const fade = lt < 0.4 ? lt / 0.4 : lt > 13.6 ? Math.max(0, 1 - (lt - 13.6) / 0.6) : 1;
+    const fl = item ? realLt : lt;
+    if (item) vis = fl < 14.2;
+    const fade = fl < 0.4 ? fl / 0.4 : fl > 13.6 ? Math.max(0, 1 - (fl - 13.6) / 0.6) : 1;
     this.tk.visible = vis && fade > 0.01; this.tk.position.copy(pos); this.tk.quaternion.copy(this.camera.quaternion); this.tk.scale.setScalar(0.6 + 0.4 * fade);
     this.tkMat.emissive.copy(col); this.tkStripe.color.copy(col).multiplyScalar(2.6); this.tkHalo.material.color.copy(col); this.tkHalo.material.opacity = 0.75 * fade;
     this.trailPts.unshift(pos.clone()); if (this.trailPts.length > 24) this.trailPts.length = 24;
@@ -429,7 +450,11 @@ export class SupportHubScene {
     for (const z of this.zones.values()) z.pulseM.opacity = 0;
     const pulseAt = (k, t0) => { const z = Z(k), u = clamp01((lt - t0) / 1.6); if (u > 0 && u < 1) { z.pulseM.opacity = (1 - u) * 0.9; z.pulse.scale.setScalar(0.7 + u * 0.7); } };
     if (src) pulseAt(src, 0); pulseAt('incoming', 3.4); pulseAt('progress', 10); pulseAt(failed ? 'failed' : 'resolved', 12.4);
-    if (step !== this._step) { this._step = step; this.onStep({ step, phase, failed, source: src ? ZL(src) : 'Agent' }); }
+    if (item) {
+      const L = { incoming: 'Waiting in Incoming', hub: item.status === 'approved' ? 'Approved · ready to replace' : 'L1 review', progress: item.status === 'needs_reconciliation' ? 'Needs reconciliation' : 'Replacement in progress', resolved: 'Resolved · new DID assigned', failed: item.status === 'rejected' ? 'Rejected' : 'Failed' };
+      const sk = item.ticket_no + item.stage + phase;
+      if (sk !== this._step) { this._step = sk; this.onStep({ step: `${item.ticket_no} · ${L[item.stage]}`, phase, failed, ticket: item, live: !!item.live }); }
+    } else if (step !== this._step) { this._step = step; this.onStep({ step, phase, failed, source: src ? ZL(src) : 'Agent' }); }
   }
 
   // ---------- camera, selection, data ----------

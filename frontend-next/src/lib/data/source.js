@@ -31,6 +31,7 @@ export const getEmployees = P('P_getEmployees');
 export const getHistory = P('P_getHistory');
 export const employeesFrom = L.employeesFrom;
 export const historyFrom = L.historyFrom;
+export const normReq = L.normReq;
 
 // ---- actions ----
 const sim = (result, ms = 600) => new Promise((r) => setTimeout(() => r({ preview: true, ...result }), ms));
@@ -38,6 +39,12 @@ export const saveSettings = pick(L.saveSettings, (settings) => sim({ ok: true, c
 export const syncInventory = pick(L.syncInventory, () => sim({ ok: true, counts: {} }, 900));
 export const syncCalls = pick(L.syncCalls, () => sim({ created: 0, repeated: 0, fetched: 0 }, 900));
 export const syncEmployees = pick(L.syncEmployees, () => preview().then((m) => sim({ count: m.employeeCount() }, 900)));
+export const syncHistory = pick(L.syncHistory, () => sim({ ok: true }, 700));
+const DEMO_GROUPS = [['inventory', 'DID inventory snapshots'], ['requests', 'Support requests, calls and ticket events'], ['notifications', 'Notification log'], ['employees', 'Employee directory'], ['history', 'Agent replacement history'], ['journal', 'Change log and operation queue'], ['jobs', 'Scheduled job status'], ['activity', 'Sign-in and settings audit logs']];
+export const dataStatus = pick(L.dataStatus, () => sim({ confirmation: 'CLEAR_SELECTED_DATA', groups: DEMO_GROUPS.map(([group, label], i) => ({ group, label, rows: 40 * (i + 1), tabs: [{ tab: label, rows: 40 * (i + 1) }] })) }, 300));
+export const clearData = pick(L.clearData, (groups) => sim({ ok: true, preview: true, cleared: groups.map((g) => ({ tab: g, cleared: 0, backup: '' })) }, 900));
+export const getLive = pick(L.getLive, () => Promise.resolve(null));
+export const importRequests = pick(L.importRequests, (entries) => sim({ created: [], failed: entries.map((e) => ({ entry: e, reason: 'Preview: nothing is imported' })) }, 700));
 export const runReminders = pick(L.runReminders, () => sim({ processed: 0 }));
 export const reviewRequest = pick(L.reviewRequest, (id, approved) => sim({ request_id: id, status: approved ? 'approved' : 'rejected' }));
 export const reassignRequests = pick(L.reassignRequests, () => sim({ queue_id: 'preview', accepted: true, status: 'pending' }));

@@ -1,5 +1,7 @@
 <script>
-  import { db, opStats, totals, flowCounts, sceneData, poolActivity, trend } from '../lib/store.svelte.js';
+  import TicketDrawer from '../components/TicketDrawer.svelte';
+  import LiveBadge from '../components/LiveBadge.svelte';
+  import { db, opStats, totals, flowCounts, sceneData, poolActivity, trend, storyQueue } from '../lib/store.svelte.js';
   import { poolChart, trendChart } from '../lib/charts.js';
   import { rangePool, rangeTrend } from '../lib/range.svelte.js';
   import RangePicker from '../components/RangePicker.svelte';
@@ -24,8 +26,8 @@
   let ops = $derived(opStats());
   let t = $derived(totals());
   let flow = $derived(flowCounts());
-  let data = $derived(sceneData());
-  let view = $state('3d'), selected = $state(null), opFilter = $state('all'), statusFilter = $state('all'), teamFilter = $state('all'), q = $state(''), auto = $state(false), sceneRef = $state(), hint = $state(true), stageEl;
+  let data = $derived({ ...sceneData(), story: storyQueue() });
+  let view = $state('3d'), selected = $state(null), opFilter = $state('all'), statusFilter = $state('all'), teamFilter = $state('all'), q = $state(''), auto = $state(false), sceneRef = $state(), hint = $state(true), stageEl, ticket = $state(null);
   onMount(() => { const off = () => (hint = false); const t = setTimeout(off, 7000); stageEl?.addEventListener('cc-interact', off); return () => { clearTimeout(t); stageEl?.removeEventListener('cc-interact', off); }; });
   // managers come from the employee directory (role5), so the filter matches real data
   let managers = $derived([...new Set(db.employees.map((e) => e.role5).filter(Boolean))].sort());
@@ -74,7 +76,7 @@
     <div class="hud-tools">
       <button class="btn btn-icon" title="Reset view" aria-label="Reset view" onclick={() => { pickOp('all'); sceneRef?.reset(); }}><Icon name="reset" size={15} /></button>
       <button class="btn btn-icon" class:act={auto} title="Auto-orbit" aria-label="Toggle auto orbit" aria-pressed={auto} onclick={() => (auto = !auto)}><Icon name={auto ? 'pause' : 'play'} size={15} /></button>
-      <span class="illus" title="People, call routes and status lights are animated for illustration; they do not represent real employees or live calls.">Illustrative activity · not live</span>
+      <LiveBadge />
       {#if hint}<span class="hint" out:fade={{ duration: 400 }}>Drag to orbit · scroll to zoom · click a building</span>{/if}
     </div>
 
@@ -102,14 +104,23 @@
           <div class="dg"><div><small>Directory</small><b>{n(t.agents)}</b></div><div><small>With active DID</small><b>{n(t.active)}</b></div></div>
           <button class="btn btn-sm" onclick={() => go('command', 'agent')}>Open Agent 360°</button>
         {:else if selected.type === 'flow'}
-          <div class="dg">{#each Object.entries(TICKET_ZONES) as [k, z]}<div class:hl={selected.key === k}><small>{z.label}</small><b>{n(data.columns?.[k])}</b></div>{/each}</div>
-          <button class="btn btn-sm" onclick={() => go('command', 'replacement')}>Open Replacement Queue</button>
+          <div class="dg">{#each Object.entries(TICKET_ZONES) as [k, z]}<button class="zc" class:hl={selected.key === k} onclick={() => (selected = { type: 'flow', key: k })}><small>{z.label}</small><b>{n(data.columns?.[k])}</b></button>{/each}</div>
+          {#if selected.key}
+            {@const list = db.requests.filter((r) => TICKET_ZONES[selected.key].statuses.includes(r.status)).sort((a, b) => String(b.completed_utc || b.first_call_utc).localeCompare(String(a.completed_utc || a.first_call_utc)))}
+            <div class="tks">
+              {#each list.slice(0, 6) as r (r.request_id)}
+                <button class="tk" onclick={() => (ticket = r)}><b class="mono">{r.ticket_no}</b><span>{r.agent_name || r.agent_number}</span><small>{r.status === 'completed' ? `${r.current_did} → ${r.replacement_new_did || '—'} · ${agoShort(r.completed_utc)}` : `${r.current_did} · ${agoShort(r.first_call_utc)}`}</small></button>
+              {:else}<div class="muted sm">No tickets</div>{/each}
+            </div>
+          {/if}
+          <button class="btn btn-sm" onclick={() => go('command', 'replacement', { tab: { incoming: 'ready', progress: 'processing', resolved: 'done', failed: 'failed' }[selected.key] || 'ready' })}>Open Replacement Queue</button>
         {:else}
           <div class="dg"><div><small>Total DIDs</small><b>{n(t.total)}</b></div><div><small>Operators</small><b>{ops.length}</b></div></div>
         {/if}
       </div>
     {/if}
   </section>
+  <TicketDrawer {ticket} onclose={() => (ticket = null)} />
 
   <aside class="rail">
     <div class="panel panel-pad tot">
@@ -117,6 +128,7 @@
       <a class="li" href="#/command/inventory?status=active"><i style="background:var(--ok)"></i>Active Assignments<b class="g">{n(t.active)}</b></a>
       <a class="li" href="#/command/pool"><i style="background:var(--info)"></i>Available Pool<b class="b">{n(t.pool)}</b></a>
       <a class="li" href="#/command/replacement"><i style="background:var(--warn)"></i>Pending Replacement<b class="o">{n(flow.pending)}</b></a>
+      <a class="li" href="#/command/replacement?tab=done"><i style="background:#16a34a"></i>Completed Replacements<b class="g">{n(flow.completed)}</b></a>
       <a class="li" href="#/command/risk"><i style="background:var(--bad)"></i>Duplicate Alerts<b class="r">{n(t.duplicates)}</b></a>
     </div>
     <div class="panel panel-pad">
@@ -158,6 +170,11 @@
 </div>
 
 <style>
+  .zc { border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; padding: 6px 8px; border-radius: 9px; display: grid; } .zc:hover { background: rgba(20,26,38,.05); }
+  .tks { display: grid; gap: 4px; max-height: 260px; overflow: auto; }
+  .tk { display: grid; grid-template-columns: auto 1fr; gap: 0 8px; text-align: left; border: 1px solid var(--line-2); background: #fff; border-radius: 10px; padding: 7px 9px; cursor: pointer; font: inherit; } .tk:hover { border-color: #f8d0b5; background: var(--brand-50); }
+  .tk b { font-size: 11.5px; } .tk span { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .tk small { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
+  .sm { font-size: 12px; }
   .dg .hl { outline: 2px solid var(--brand); outline-offset: -2px; }
   .qin { width: auto; }
   .cnote { margin: 4px 0 0; font-size: 10.5px; color: var(--faint); line-height: 1.35; } .legend b { color: var(--ink); }

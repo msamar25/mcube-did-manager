@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { route, go, NAV, ADMIN_NAV, hadHash } from './lib/router.svelte.js';
-  import { session, signOut, signIn, restore, hasApp, appOf } from './lib/session.svelte.js';
+  import { session, signOut, signIn, restore, hasApp, appOf, perm } from './lib/session.svelte.js';
   import { APP_HOME, ROLE_LABEL } from './lib/data/platform.js';
   import AppSwitcher from './components/AppSwitcher.svelte';
   import { db, load, flowCounts, live, refresh, startAutoRefresh, stopAutoRefresh, resetData, notes, loadSeen, markAllRead, unreadCount } from './lib/store.svelte.js';
@@ -26,7 +26,7 @@
     notifications: () => import('./pages/Notifications.svelte'), risk: () => import('./pages/Risk.svelte'),
     insights: () => import('./pages/Insights.svelte'), teams: () => import('./pages/Teams.svelte'),
     reports: () => import('./pages/Reports.svelte'), settings: () => import('./pages/Settings.svelte'),
-    launcher: () => import('./pages/Launcher.svelte'), custom: () => import('./pages/CustomReports.svelte'), users: () => import('./pages/admin/Users.svelte'), appSettings: () => import('./pages/admin/AppSettings.svelte'),
+    launcher: () => import('./pages/Launcher.svelte'), custom: () => import('./pages/CustomReports.svelte'), dataSetup: () => import('./pages/DataSetup.svelte'), users: () => import('./pages/admin/Users.svelte'), appSettings: () => import('./pages/admin/AppSettings.svelte'),
     globalSettings: () => import('./pages/admin/GlobalSettings.svelte'), audit: () => import('./pages/admin/Audit.svelte')
   };
   const PAGES = {
@@ -36,7 +36,7 @@
     'analytics/insights': lazy.insights, 'analytics/teams': lazy.teams,
     'reports/audit': lazy.reports, 'reports/history': lazy.reports, 'reports/exports': lazy.custom,
     'settings/intake': lazy.settings, 'settings/safety': lazy.settings, 'settings/notifications': lazy.settings, 'settings/email': lazy.settings,
-    'settings/employees': lazy.settings, 'settings/credentials': lazy.settings, 'settings/advanced': lazy.settings,
+    'settings/employees': lazy.settings, 'settings/credentials': lazy.settings, 'settings/data': lazy.dataSetup, 'settings/advanced': lazy.settings,
     'home/apps': lazy.launcher, 'admin/users': lazy.users, 'admin/apps': lazy.appSettings, 'admin/global': lazy.globalSettings, 'admin/audit': lazy.audit
   };
   const pageCache = new Map();
@@ -47,14 +47,21 @@
   }
 
   // Each app is independent: its own navigation, data and permissions. home = App Launcher.
-  let nav = $derived(route.app === 'did' ? NAV.filter((s) => !s.admin || session.role === 'admin') : route.app === 'users' ? ADMIN_NAV : []);
+  // DID menus follow the user's DID permissions (sections and pages can each require one).
+  const okP = (x) => !x.perm || perm('did', x.perm);
+  let didNav = $derived(NAV.filter(okP).map((s) => ({ ...s, pages: s.pages.filter(okP) })).filter((s) => s.pages.length));
+  let nav = $derived(route.app === 'did' ? didNav : route.app === 'users' ? ADMIN_NAV : []);
   let section = $derived(nav.find((s) => s.id === route.section) || nav[0]);
   let appMeta = $derived(appOf(route.app));
   // why the current app can't be opened ('' = it can)
   let denied = $derived(route.app === 'home' ? '' : route.app === 'users' ? (session.canManage ? '' : 'noaccess')
     : !hasApp('did') ? 'noaccess' : !appMeta?.enabled && !session.superAdmin ? 'disabled' : '');
   let didActive = $derived(route.app === 'did' && !denied);
-  let blocked = $derived(route.app === 'did' && route.section === 'settings' && session.role !== 'admin');
+  let blocked = $derived.by(() => {
+    if (route.app !== 'did') return false;
+    const sec = NAV.find((s) => s.id === route.section), pg = sec?.pages.find((p) => p.id === route.page);
+    return !!(sec && (!okP(sec) || (pg && !okP(pg))));
+  });
   let pagePromise = $derived(pageFor(`${route.section}/${route.page}`));
   let fullBleed = $derived(route.section === 'command' && route.page === '3d');
   let noSidebar = $derived(route.section === 'dashboard' || route.app === 'home');
@@ -177,7 +184,7 @@
       {:else if !db.loaded}
         <div class="loading"><div class="sk"></div><div class="sk"></div><div class="sk tall"></div></div>
       {:else if blocked}
-        <div class="panel panel-pad empty"><Icon name="lock" size={22} /><b>Administrator permission required</b><span>Settings and MCube credentials are restricted to administrators.</span></div>
+        <div class="panel panel-pad empty"><Icon name="lock" size={22} /><b>Permission required</b><span>Ask an administrator for access to this page.</span></div>
       {:else}
         {#key route.section + route.page}{#await pagePromise}<div class="page-loading" aria-busy="true"><span></span></div>{:then Page}<div class="page fade-up"><Page /></div>{:catch}<div class="page-loading err">This page could not load. Check the connection and <button class="btn btn-sm" onclick={() => location.reload()}>reload</button></div>{/await}{/key}
       {/if}

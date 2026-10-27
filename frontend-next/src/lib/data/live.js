@@ -8,7 +8,7 @@ import { isReplacement, parseTs } from '../calc.js';
 export const idStr = (v) => (v === null || v === undefined ? '' : typeof v === 'number' ? (Number.isSafeInteger(v) ? String(v) : '') : String(v).trim());
 const ID_FIELDS = ['agent_number', 'callto', 'current_did', 'replacement_new_did', 'callid', 'request_id', 'replacement_batch'];
 // ticket_no uses the same formula as the backend (SH- + first 12 chars of request_id)
-const normReq = (r) => { const o = { ...r }; for (const k of ID_FIELDS) if (k in o) o[k] = idStr(o[k]); if (!o.ticket_no && o.request_id) o.ticket_no = 'SH-' + o.request_id.replace(/-/g, '').slice(0, 12).toUpperCase(); o.call_count = Number(o.call_count || 0); o.reminder_count = Number(o.reminder_count || 0); return o; };
+export const normReq = (r) => { const o = { ...r }; for (const k of ID_FIELDS) if (k in o) o[k] = idStr(o[k]); if (!o.ticket_no && o.request_id) o.ticket_no = 'SH-' + o.request_id.replace(/-/g, '').slice(0, 12).toUpperCase(); o.call_count = Number(o.call_count || 0); o.reminder_count = Number(o.reminder_count || 0); return o; };
 const normLog = (e) => ({ ...e, old_did: idStr(e.old_did), new_did: idStr(e.new_did), agent_number: idStr(e.agent_number), batch_id: idStr(e.batch_id), time_utc: String(e.time_utc ?? e.time_ist ?? '') });
 
 let lastInventory = [];
@@ -89,6 +89,11 @@ export const saveSettings = (settings, version) => api('/api/settings', { method
 export const syncInventory = () => api('/api/sync', { method: 'POST', timeout: 120000 });
 export const syncCalls = () => api('/api/requests/sync', { method: 'POST', timeout: 120000 });
 export const syncEmployees = () => api('/api/employees/sync', { method: 'POST', timeout: 120000 });
+export const syncHistory = () => api('/api/agent-history/sync', { method: 'POST', timeout: 120000 });
+export const dataStatus = () => api('/api/admin/data/status', { timeout: 90000 });
+export const clearData = (groups, confirmation) => api('/api/admin/data/clear', { method: 'POST', body: { groups, confirmation }, timeout: 300000 });
+export const getLive = () => api('/api/live', { timeout: 30000 });
+export const importRequests = (entries, comment) => api('/api/requests/import', { method: 'POST', body: { entries, comment }, timeout: 120000 });
 export const runReminders = () => api('/api/reminders/run', { method: 'POST', timeout: 120000 });
 export const reviewRequest = (id, approved, reason) => api(`/api/requests/${encodeURIComponent(id)}/review`, { method: 'POST', body: { approved, reason } });
 export const reassignRequests = (request_ids) => api('/api/requests/reassign', { method: 'POST', body: { request_ids } });

@@ -291,6 +291,7 @@ export class CommandScene {
   setData(data) {
     this.data = data;
     this.updateBoards?.(data); // 3D ticket boards (canvas), independent of HTML labels
+    if (data.story) this.setStory?.(data.story); // real tickets for the moving ticket card
     if (!this.labelsOn) return;
     for (const op of data.operators || []) { const isl = this.islands.get(op.key); if (isl?.card) isl.card.innerHTML = opCardHtml(op); }
     const set = (root, k, v) => { const n = root?.querySelector(`[data-k="${k}"]`); if (n) n.textContent = Number(v ?? 0).toLocaleString('en-IN'); };

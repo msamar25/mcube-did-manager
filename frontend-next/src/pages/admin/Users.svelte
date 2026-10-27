@@ -1,6 +1,6 @@
 <script>
   // Users & Access: who can sign in, and which apps (with which role) each user can open.
-  import { listUsers, saveUser, ROLE_LABEL } from '../../lib/data/platform.js';
+  import { listUsers, saveUser, getPlatformSettings, ROLE_LABEL } from '../../lib/data/platform.js';
   import { session, reloadMe } from '../../lib/session.svelte.js';
   import { ist, initials, avatarColor } from '../../lib/format.js';
   import PageHead from '../../components/PageHead.svelte';
@@ -14,16 +14,20 @@
   let tab = $state('active'), appFilter = $state('');
   let edit = $state(null), form = $state(null), saving = $state(false);
 
+  let appSettings = $state({});
   async function load() {
     loading = true; error = '';
-    try { const r = await listUsers(); users = r.users; apps = r.apps; } catch (e) { error = e.message; } finally { loading = false; }
+    try { const [r, st] = await Promise.all([listUsers(), getPlatformSettings().catch(() => ({ apps: {} }))]); users = r.users; apps = r.apps; appSettings = st.apps || {}; } catch (e) { error = e.message; } finally { loading = false; }
   }
+  // role default for a permission (App Settings), used to show what "Role default" means
+  const byRole = (app, p, role) => String(appSettings[app]?.['perm:' + p.id] ?? p.roles.join(',')).split(',').map((x) => x.trim()).includes(role);
   load();
   let counts = $derived({ active: users.filter((u) => u.status === 'active').length, disabled: users.filter((u) => u.status !== 'active').length });
   let rows = $derived(users.filter((u) => (tab === 'active' ? u.status === 'active' : u.status !== 'active') && (!appFilter || u.apps[appFilter])));
   let columns = $derived([
     { key: 'email', label: 'User', custom: true, lock: true, value: (u) => u.name || u.email, search: (u) => `${u.name} ${u.email}`, export: (u) => u.email, minWidth: '230px' },
     ...apps.map((a) => ({ key: 'app_' + a.id, label: a.name, custom: true, value: (u) => u.apps[a.id] || '', export: (u) => u.apps[a.id] || '' })),
+    { key: 'perms', label: 'DID permissions', value: (u) => (u.perms?.did || []).join(', '), format: (v, u) => (u.perms?.did || []).map((x) => apps.find((a) => a.id === 'did')?.permissions?.find((p) => p.id === x)?.label || x).join(', ') || '—', minWidth: '200px' },
     { key: 'source', label: 'Managed in', value: (u) => (u.super_admin ? 'Server environment' : u.source === 'environment' ? 'Server environment' : 'User Management'), format: (v, u) => (u.source === 'environment' ? 'Server environment' : 'User Management') },
     { key: 'status', label: 'Status', custom: true, value: (u) => u.status },
     { key: 'has_pin', label: 'PIN', value: (u) => (u.has_pin ? 'Set' : 'Not set'), format: (v) => (v ? 'Set' : 'Not set') },
@@ -33,7 +37,8 @@
   function open(u) {
     edit = u || {};
     form = { email: u?.email || '', display_name: u?.name || '', status: u?.status === 'disabled' ? 'disabled' : 'active', pin: '', default_app: u?.default_app || '', notes: u?.notes || '',
-      apps: Object.fromEntries(apps.map((a) => [a.id, u?.apps?.[a.id] || ''])) };
+      apps: Object.fromEntries(apps.map((a) => [a.id, u?.apps?.[a.id] || ''])),
+      perms: Object.fromEntries(apps.filter((a) => a.permissions?.length).map((a) => [a.id, Object.fromEntries(a.permissions.map((p) => [p.id, u?.overrides?.[a.id]?.[p.id] || '']))])) };
   }
   let isNew = $derived(edit && !edit.email);
   let locked = $derived(!!edit?.super_admin);
@@ -92,6 +97,17 @@
             <select class="select" bind:value={form.apps[a.id]} disabled={locked || (a.id === 'users' && !session.superAdmin)} aria-label="{a.name} role">
               <option value="">No access</option>{#each a.roles as r}<option value={r}>{ROLE_LABEL[r] || r}</option>{/each}
             </select></div>
+          {#if a.permissions?.length && form.apps[a.id]}
+            <div class="perms">
+              {#each a.permissions as p}
+                {@const def = byRole(a.id, p, form.apps[a.id])}
+                <div class="pr"><span>{p.label}</span>
+                  <select class="select" bind:value={form.perms[a.id][p.id]} disabled={locked} aria-label="{p.label} permission">
+                    <option value="">Role default · {def ? 'Yes' : 'No'}</option><option value="allow">Allow</option><option value="deny">Deny</option>
+                  </select></div>
+              {/each}
+            </div>
+          {/if}
         {/each}
       </div>
       {#if !session.superAdmin}<small>Only the super administrator can grant User Management.</small>{/if}
@@ -117,4 +133,6 @@
   .an { display: grid; } .an b { font-size: 13px; } .an small { color: var(--faint); font-weight: 500; }
   .ic { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: #fff; background: var(--c); }
   .end { justify-content: flex-end; gap: 8px; }
+  .perms { display: grid; gap: 4px; margin: -2px 0 4px 38px; padding: 8px 10px; border-left: 2px solid var(--line); }
+  .pr { display: grid; grid-template-columns: 1fr 170px; gap: 8px; align-items: center; font-size: 12px; font-weight: 550; } .pr .select { height: 30px; font-size: 12px; }
 </style>

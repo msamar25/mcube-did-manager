@@ -7,7 +7,8 @@
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import OpChip from './OpChip.svelte';
-  import { db, refresh } from '../lib/store.svelte.js';
+  import { db, refresh, live } from '../lib/store.svelte.js';
+  import { go } from '../lib/router.svelte.js';
   import { LIVE, reassignDids, reassignRequests, getQueue, getBatch } from '../lib/data/source.js';
   import { toast } from './Toast.svelte';
   let { open = false, items = [], requestIds = null, onclose = () => {} } = $props();
@@ -44,10 +45,19 @@
         const ok = (batch?.results || []).filter((r) => r.status === 'success').length;
         if (queueStatus === 'completed' && !batch?.error) toast(`Replacement finished · ${ok} of ${plan.length} agent${plan.length === 1 ? '' : 's'} updated`);
         else toast('Replacement stopped — needs an administrator to reconcile in MCube (see Settings → Advanced)', 'bad');
-        refresh(true);
+        await reloadInventory();
       }
     } catch (e) { error = e.message; }
   }
+  // after a batch: re-read the inventory (the backend rewrote the snapshot after each verified agent)
+  let updating = $state(false);
+  async function reloadInventory() {
+    updating = true;
+    try { for (let i = 0; i < 20 && live.busy; i++) await new Promise((r) => setTimeout(r, 500)); await refresh(true); }
+    finally { updating = false; }
+  }
+  const invOf = (did) => db.inventory.find((i) => String(i.did) === String(did));
+  let updated = $derived((batch?.results || []).filter((r) => r.status === 'success').map((r) => ({ old: r.old, new: r.new, agent: plan.find((p) => String(p.did) === String(r.old))?.agent || '', oldNow: invOf(r.old), newNow: invOf(r.new) })));
   async function simulate() {
     phase = 'running';
     for (const p of plan) for (let s = 0; s < STEPS.length; s++) { progress[p.did] = s + 1; await new Promise((r) => setTimeout(r, 160)); }
@@ -90,6 +100,14 @@
       </tbody>
     </table>
   </div>
+  {#if phase === 'done' && updated.length}
+    <div class="upd">
+      <div class="uh"><b>Updated DIDs</b>{#if updating}<small class="muted">Refreshing inventory…</small>{:else}<small class="muted">From the refreshed inventory</small>{/if}<button class="btn btn-sm" onclick={() => { onclose(); go('command', 'inventory', { q: updated.map((u) => u.new).join(' ') }); }}>Open DID Inventory</button></div>
+      <table class="tbl"><thead><tr><th>Agent</th><th>Old DID</th><th>New DID</th><th>Operator</th></tr></thead><tbody>
+        {#each updated as u}<tr><td class="strong">{u.agent}</td><td class="mono">{u.old}<div class="small">{u.oldNow ? u.oldNow.status : 'not in snapshot'}</div></td><td class="mono strong">{u.new}<div class="small" class:ok={u.newNow?.status === 'active'}>{u.newNow ? `${u.newNow.status}${u.newNow.agent ? ' · ' + u.newNow.agent : ''}` : updating ? '…' : 'not in snapshot yet'}</div></td><td>{#if u.newNow}<OpChip name={u.newNow.operator} />{/if}</td></tr>{/each}
+      </tbody></table>
+    </div>
+  {/if}
   {#if phase === 'confirm'}<label class="ack"><input type="checkbox" bind:checked={ack} /> Confirm replacement</label>{/if}
   {#snippet footer()}
     <button class="btn" disabled={phase === 'running' || phase === 'submitting'} onclick={onclose}>{phase === 'done' ? 'Close' : 'Cancel'}</button>
@@ -103,6 +121,8 @@
   .st small { display: block; max-width: 210px; } .st.ok small { color: var(--ok); font-weight: 650; } .st.bad small { color: var(--bad); font-weight: 650; }
   .checks { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 12px; color: var(--ink-2); }
   .checks li { display: flex; gap: 6px; align-items: flex-start; } .checks :global(svg) { color: var(--ok); flex: none; margin-top: 1px; }
+  .upd { border: 1px solid #abefc6; background: #f6fef9; border-radius: 12px; padding: 10px; display: grid; gap: 8px; }
+  .uh { display: flex; gap: 8px; align-items: center; } .uh .btn { margin-left: auto; } .small.ok { color: var(--ok); font-weight: 650; }
   .ack { display: flex; gap: 8px; align-items: center; font-weight: 600; font-size: 12.5px; } .ack input { accent-color: var(--brand); width: 15px; height: 15px; }
   @media (max-width: 600px) { .checks { grid-template-columns: 1fr; } }
 </style>

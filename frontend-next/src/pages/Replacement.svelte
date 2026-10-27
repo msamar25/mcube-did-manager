@@ -1,8 +1,9 @@
 <script>
+  import { can } from '../lib/session.svelte.js';
   import { isYes } from '../lib/calc.js';
   import { getRecovery } from '../lib/data/source.js';
   import { db, flowCounts, totals } from '../lib/store.svelte.js';
-  import { go } from '../lib/router.svelte.js';
+  import { go, route } from '../lib/router.svelte.js';
   import { ago, n, ist } from '../lib/format.js';
   import { session } from '../lib/session.svelte.js';
   import PageHead from '../components/PageHead.svelte';
@@ -12,6 +13,7 @@
   import Person from '../components/Person.svelte';
   import DataTable from '../components/DataTable.svelte';
   import ReassignModal from '../components/ReassignModal.svelte';
+  import TicketDrawer from '../components/TicketDrawer.svelte';
 
   let flow = $derived(flowCounts());
   let t = $derived(totals());
@@ -20,10 +22,10 @@
   $effect(() => { db.logs; getRecovery().then((r) => (unresolved = r.unresolved || [])).catch(() => {}); });
   let readyCount = $derived(db.requests.filter((r) => r.status === 'approved' || (r.status === 'pending' && !recentlyReplaced(r))).length);
   let reviewCount = $derived(db.requests.filter((r) => r.status === 'review_required' || (r.status === 'pending' && recentlyReplaced(r))).length);
-  let tab = $state('ready'), selected = $state([]), open = $state(false);
+  let tab = $state(['ready', 'review', 'processing', 'done', 'failed'].includes(route.params.tab) ? route.params.tab : 'ready'), selected = $state([]), open = $state(false), ticket = $state(null);
   // The backend sets recent_warning using the configured recent_replacement_days; Sheets stores it as "yes"/"no".
   const recentlyReplaced = (r) => isYes(r.recent_warning);
-  let rows = $derived(db.requests.filter((r) => tab === 'ready' ? (r.status === 'approved' || (r.status === 'pending' && !recentlyReplaced(r))) : tab === 'review' ? r.status === 'review_required' || (r.status === 'pending' && recentlyReplaced(r)) : tab === 'processing' ? r.status === 'processing' : r.status === 'failed'));
+  let rows = $derived(db.requests.filter((r) => tab === 'ready' ? (r.status === 'approved' || (r.status === 'pending' && !recentlyReplaced(r))) : tab === 'review' ? r.status === 'review_required' || (r.status === 'pending' && recentlyReplaced(r)) : tab === 'processing' ? r.status === 'processing' : tab === 'done' ? r.status === 'completed' : r.status === 'failed'));
   let chosen = $derived(db.requests.filter((r) => selected.includes(r.request_id)).map((r) => ({ agent: r.agent_name, agent_number: r.agent_number, did: r.current_did, operator: r.operator })));
   let pool = $derived(db.inventory.filter((i) => i.status === 'pool').sort((a, b) => a.fifo - b.fifo));
   let lastBatch = $derived(db.logs.find((l) => l.event === 'BATCH_COMPLETE' || l.event === 'BATCH_STOPPED'));
@@ -36,13 +38,25 @@
     { key: 'status', label: 'Status', custom: true, search: (r) => String(r.status).replace(/_/g, ' ') },
     { key: 'first_call_utc', label: 'Waiting', custom: true }
   ];
-  const SOURCES = { call: 'Call', form: 'Form', both: 'Call + Form', unknown: '—' };
+  // Completed tab: what was replaced, with what, and when
+  const doneColumns = [
+    { key: 'ticket_no', label: 'Ticket', mono: true, strong: true, lock: true },
+    { key: 'agent_name', label: 'Agent', custom: true, minWidth: '190px', search: (r) => `${r.agent_name} ${r.agent_number}` },
+    { key: 'current_did', label: 'Old DID', mono: true },
+    { key: 'replacement_new_did', label: 'New DID', mono: true, strong: true },
+    { key: 'operator', label: 'Operator', custom: true },
+    { key: 'completed_utc', label: 'Completed', value: (r) => r.completed_utc || '', format: (v) => (v ? ist(v) : '—') },
+    { key: 'first_call_utc', label: 'Took', value: (r) => (Date.parse(r.completed_utc) || 0) - (Date.parse(r.first_call_utc) || 0), format: (v, r) => took(r) }
+  ];
+  function took(r) { const ms = (Date.parse(r.completed_utc) || 0) - (Date.parse(r.first_call_utc) || 0); if (!(ms > 0)) return '—'; const h = ms / 36e5; return h < 1 ? `${Math.round(h * 60)} min` : h < 48 ? `${h.toFixed(1)} h` : `${Math.round(h / 24)} d`; }
+  let sortedRows = $derived(tab === 'done' ? [...rows].sort((a, b) => String(b.completed_utc).localeCompare(String(a.completed_utc))) : [...rows].sort((a, b) => String(a.first_call_utc).localeCompare(String(b.first_call_utc))));
+  const SOURCES = { call: 'Call', form: 'Form', both: 'Call + Form', import: 'Imported', unknown: '—' };
   const STAGES = [['Fresh inventory', 'Pull active, inactive & pool lists from MCube'], ['Deactivate', 'Release the agent\'s current DID'], ['Activate', 'Assign the next FIFO pool DID'], ['Verify', 'Re-read inventory; stop if not confirmed'], ['Record', 'Append Change_Logs + history; notify']];
 </script>
 
 <PageHead title="Replacement Queue" eyebrow="Command Center">
   {#snippet actions()}
-    <button class="btn btn-primary" disabled={!chosen.length} onclick={() => (open = true)}><Icon name="swap" size={14} />Reassign selected ({chosen.length})</button>
+    {#if can.reassign()}<button class="btn btn-primary" disabled={!chosen.length} onclick={() => (open = true)}><Icon name="swap" size={14} />Reassign selected ({chosen.length})</button>{/if}
   {/snippet}
 </PageHead>
 
@@ -52,7 +66,7 @@
 
 <div class="pipe panel">
   {#each [['ready', 'Ready to replace', readyCount, 'var(--warn)', 'inbox'], ['review', 'Needs review', reviewCount, '#8b5cf6', 'eye'], ['processing', 'Processing', flow.processing, 'var(--info)', 'refresh'], ['done', 'Completed', flow.completed, 'var(--ok)', 'ok'], ['failed', 'Failed', flow.failed, 'var(--bad)', 'alert']] as [k, l, c, col, ic], i}
-    <button class="st" class:on={tab === k} disabled={k === 'done'} onclick={() => { if (k !== 'done') { tab = k; selected = []; } }} style="--c:{col}">
+    <button class="st" class:on={tab === k} onclick={() => { tab = k; selected = []; }} style="--c:{col}">
       <span class="si"><Icon name={ic} size={15} /></span><span class="sl"><small>{l}</small><b class="tnum">{n(c)}</b></span>
     </button>
     {#if i < 4}<span class="arrow"><Icon name="right" size={14} /></span>{/if}
@@ -66,19 +80,20 @@
         <button class:on={tab === 'ready'} onclick={() => { tab = 'ready'; selected = []; }}>Ready <span class="c">{readyCount}</span></button>
         <button class:on={tab === 'review'} onclick={() => { tab = 'review'; selected = []; }}>Needs review <span class="c">{reviewCount}</span></button>
         <button class:on={tab === 'processing'} onclick={() => { tab = 'processing'; selected = []; }}>Processing <span class="c">{flow.processing}</span></button>
+        <button class:on={tab === 'done'} onclick={() => { tab = 'done'; selected = []; }}>Completed <span class="c">{flow.completed}</span></button>
         <button class:on={tab === 'failed'} onclick={() => { tab = 'failed'; selected = []; }}>Failed <span class="c">{flow.failed}</span></button>
       </div>
-      <span class="muted sm">{tab === 'ready' ? 'Oldest first. Select up to the available pool size.' : tab === 'review' ? 'Replaced within 3 days or flagged — review before reassigning.' : tab === 'failed' ? 'Batch stopped. Reconcile with MCube before retrying.' : 'Running in the single background worker.'}</span>
+      <span class="muted sm">{tab === 'ready' ? 'Oldest first.' : tab === 'review' ? 'Replaced recently — review first.' : tab === 'failed' ? 'Reconcile in MCube before retrying.' : tab === 'done' ? 'Newest first · click a row for details.' : ''}</span>
     </div>
-    <DataTable id="replacement" placeholder="Ticket, agent, number or DID" rows={[...rows].sort((a, b) => String(a.first_call_utc).localeCompare(String(b.first_call_utc)))} {columns} pageSize={11} rowKey={(r) => r.request_id} selectable={tab === 'ready'} bind:selected canSelect={(r) => r.status === 'approved' || !recentlyReplaced(r)}>
+    {#key tab === 'done'}<DataTable id={tab === 'done' ? 'replacement-done' : 'replacement'} exportName={tab === 'done' ? 'completed-replacements' : 'replacement-queue'} placeholder="Ticket, agent, number or DID" rows={sortedRows} columns={tab === 'done' ? doneColumns : columns} pageSize={11} rowKey={(r) => r.request_id} selectable={tab === 'ready' && can.reassign()} bind:selected canSelect={(r) => r.status === 'approved' || !recentlyReplaced(r)} onrow={(r) => (ticket = r)}>
       {#snippet cell(r, c)}
         {#if c.key === 'agent_name'}<Person name={r.agent_name} sub={r.agent_number} size={24} onclick={(e) => { e.stopPropagation(); go('command', 'agent', { n: r.agent_number }); }} />
         {:else if c.key === 'operator'}<OpChip name={r.operator} />
-        {:else if c.key === 'request_source'}<span class="src">{#if r.source_counts?.call}<span title="Calls"><Icon name="phone" size={12} />{r.source_counts.call}</span>{/if}{#if r.source_counts?.form}<span title="Forms"><Icon name="form" size={12} />{r.source_counts.form}</span>{/if}{#if !r.source_counts?.call && !r.source_counts?.form}<span class="faint">—</span>{/if}</span>
+        {:else if c.key === 'request_source'}<span class="src">{#if r.source_counts?.call}<span title="Calls"><Icon name="phone" size={12} />{r.source_counts.call}</span>{/if}{#if r.source_counts?.form}<span title="Forms"><Icon name="form" size={12} />{r.source_counts.form}</span>{/if}{#if !r.source_counts?.call && !r.source_counts?.form}<span class="faint">{r.request_source === 'import' ? 'Imported' : '—'}</span>{/if}</span>
         {:else if c.key === 'status'}<Badge status={r.status} />{#if recentlyReplaced(r)}<span class="warn-t" title="Replaced recently (within the configured recent-replacement window)"><Icon name="alert" size={12} /></span>{/if}
         {:else if c.key === 'first_call_utc'}<span class="muted">{ago(r.first_call_utc)}</span>{/if}
       {/snippet}
-    </DataTable>
+    </DataTable>{/key}
   </div>
 
   <aside class="side">
@@ -100,6 +115,7 @@
   </aside>
 </div>
 
+<TicketDrawer {ticket} onclose={() => (ticket = null)} />
 <ReassignModal {open} items={chosen} requestIds={selected} onclose={() => { open = false; selected = []; }} />
 
 <style>

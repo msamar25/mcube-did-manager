@@ -1,4 +1,5 @@
 <script>
+  import { can } from '../lib/session.svelte.js';
   import { db, opStats, totals, poolActivity, trend } from '../lib/store.svelte.js';
   import { poolChart } from '../lib/charts.js';
   import { rangePool, rangeTrend } from '../lib/range.svelte.js';
@@ -33,7 +34,7 @@
 </script>
 
 <PageHead title="Pool Intelligence" eyebrow="Command Center">
-  {#snippet actions()}<button class="btn" onclick={() => downloadCsv(pool, 'did-pool-fifo.csv')}><Icon name="download" size={14} />Export FIFO</button>{/snippet}
+  {#snippet actions()}{#if can.reports()}<button class="btn" onclick={() => downloadCsv(pool, 'did-pool-fifo.csv')}><Icon name="download" size={14} />Export FIFO</button>{/if}{/snippet}
 </PageHead>
 
 <div class="kpis">

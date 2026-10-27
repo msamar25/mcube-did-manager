@@ -20,6 +20,8 @@ export const session = $state(LIVE
   : { signedIn: !!demoRole(), checked: true, role: demoRole() || 'admin', name: '', email: '', expiredMessage: '', ...blank });
 if (!LIVE && demoRole()) applyMe(previewMe(demoRole()));
 export const hasApp = (id) => session.apps.some((a) => a.id === id && a.status !== 'planned');
+// Permission inside an app (role defaults from App Settings + per-user overrides, computed by the backend).
+export const perm = (app, id) => !!session.apps.find((a) => a.id === app)?.permissions?.includes(id);
 export const appOf = (id) => session.apps.find((a) => a.id === id);
 
 onSessionExpired((msg) => { session.signedIn = false; session.checked = true; session.expiredMessage = msg || 'Your session has expired. Please sign in again.'; });
@@ -66,8 +68,10 @@ export async function signOut() {
 
 // Permissions mirror the backend (it enforces them; the UI only hides what would be refused).
 export const can = {
-  settings: () => session.role === 'admin',
-  reassign: () => true, // operators may run replacements (v50 permissions)
-  credentials: () => session.role === 'admin',
-  recovery: () => session.role === 'admin'
+  settings: () => perm('did', 'settings'),
+  reassign: () => perm('did', 'replace'),
+  credentials: () => perm('did', 'credentials'),
+  recovery: () => perm('did', 'settings'),
+  audit: () => perm('did', 'audit'),
+  reports: () => perm('did', 'reports')
 };

@@ -1,4 +1,5 @@
 <script>
+  import { can } from '../lib/session.svelte.js';
   import { db, totals, opStats, since, refresh } from '../lib/store.svelte.js';
   import { syncInventory } from '../lib/data/source.js';
   import { isCommonPool } from '../lib/calc.js';
@@ -19,7 +20,9 @@
   let ops = $derived(opStats());
   let sinceMap = $derived(since()); // assignment time from verified replacements in Change_Logs
   let status = $state(route.params.status || 'active'), op = $state(route.params.op || 'all'), owner = $state(route.params.owner || 'all'), dupOnly = $state(false), selected = $state([]), reassign = $state(false), passport = $state(null);
-  let rows = $derived(db.inventory.filter((i) => (status === 'all' || i.status === status) && (op === 'all' || i.operator === op) && (!dupOnly || i.duplicate) && (owner === 'all' || (owner === 'common' ? isCommonPool(i) : i.status === 'active' && !isCommonPool(i)))));
+  // ?q=DID DID … (e.g. the DIDs just assigned by a replacement) shows only those lines, in every status
+  let onlyDids = $state((route.params.q || '').split(/[\s,]+/).filter(Boolean));
+  let rows = $derived(onlyDids.length ? db.inventory.filter((i) => onlyDids.includes(String(i.did))) : db.inventory.filter((i) => (status === 'all' || i.status === status) && (op === 'all' || i.operator === op) && (!dupOnly || i.duplicate) && (owner === 'all' || (owner === 'common' ? isCommonPool(i) : i.status === 'active' && !isCommonPool(i)))));
   // who holds the line: real agent vs MCube "Common Pool" (active, no agent)
   let ownerCounts = $derived({ agent: new Set(db.inventory.filter((i) => i.status === 'active' && !isCommonPool(i)).map((i) => i.did)).size, common: new Set(db.inventory.filter(isCommonPool).map((i) => i.did)).size });
   let dupActive = $derived(new Set(db.inventory.filter((i) => i.duplicate && i.status === 'active').map((i) => i.did)).size);
@@ -44,8 +47,8 @@
 <PageHead title="DID Inventory" sub="Synced {ago(db.lastSync)}" eyebrow="Command Center">
   {#snippet actions()}
     <button class="btn" disabled={syncing} onclick={syncNow} title="Reads active, inactive and pool lists from MCube and rewrites the snapshot tabs"><Icon name="refresh" size={14} />{syncing ? 'Syncing with MCube…' : 'Refresh from MCube'}</button>
-    <button class="btn" onclick={() => downloadCsv(rows, `did-inventory-${status}.csv`)}><Icon name="download" size={14} />Export</button>
-    <button class="btn btn-primary" disabled={!chosen.length} onclick={() => (reassign = true)}><Icon name="swap" size={14} />Reassign selected ({chosen.length})</button>
+    {#if can.reports()}<button class="btn" onclick={() => downloadCsv(rows, `did-inventory-${status}.csv`)}><Icon name="download" size={14} />Export</button>{/if}
+    {#if can.reassign()}<button class="btn btn-primary" disabled={!chosen.length} onclick={() => (reassign = true)}><Icon name="swap" size={14} />Reassign selected ({chosen.length})</button>{/if}
   {/snippet}
 </PageHead>
 
@@ -56,6 +59,7 @@
   <Kpi label="Duplicate DIDs" value={n(t.duplicates)} sub="{n(dupActive)} on two agents · {n(t.duplicates - dupActive)} listed twice in other lists" icon="alert" tone={dupActive ? 'bad' : 'warn'} onclick={() => { status = dupActive ? 'active' : 'all'; dupOnly = true; }} />
 </div>
 
+{#if onlyDids.length}<div class="note" style="margin-bottom:10px"><Icon name="check" size={14} /><span>Showing {onlyDids.length} DID{onlyDids.length === 1 ? '' : 's'} from the last replacement · {ago(db.lastSync)}</span><button class="btn btn-sm" onclick={() => (onlyDids = [])}>Show all</button></div>{/if}
 <div class="panel panel-pad">
   <div class="bar">
     <div class="seg">{#each tabs as [k, l, c]}<button class:on={status === k} onclick={() => { status = k; selected = []; }}>{l} <span class="cnt">{n(c)}</span></button>{/each}</div>

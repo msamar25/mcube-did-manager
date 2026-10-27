@@ -1,4 +1,5 @@
 <script>
+  import { can } from '../lib/session.svelte.js';
   import { db } from '../lib/store.svelte.js';
   import { route, go } from '../lib/router.svelte.js';
   import { ist, n, downloadCsv } from '../lib/format.js';
@@ -26,7 +27,7 @@
 
 {#if page === 'audit'}
   <PageHead title="Audit Log" eyebrow="Reports">
-    {#snippet actions()}<button class="btn btn-primary" onclick={() => downloadCsv(logs, 'change-logs.csv')}><Icon name="download" size={14} />Export {n(logs.length)} rows</button>{/snippet}
+    {#snippet actions()}{#if can.reports()}<button class="btn btn-primary" onclick={() => downloadCsv(logs, 'change-logs.csv')}><Icon name="download" size={14} />Export {n(logs.length)} rows</button>{/if}{/snippet}
   </PageHead>
   <div class="sum">
     {#each [['all', 'All events', db.logs.length, '#141a26'], ['REASSIGNMENT_COMPLETE', 'Completed', db.logs.filter((l) => l.event === 'REASSIGNMENT_COMPLETE').length, 'var(--ok)'], ['BATCH_REQUESTED', 'Batches', db.logs.filter((l) => l.event === 'BATCH_REQUESTED').length, 'var(--info)'], ['DEACTIVATION_FAILED', 'Failures', db.logs.filter((l) => l.result === 'FAILED').length, 'var(--bad)']] as [k, l, c, col]}
@@ -49,7 +50,7 @@
   </div>
 {:else if page === 'history'}
   <PageHead title="Replacement History" eyebrow="Reports">
-    {#snippet actions()}<button class="btn btn-primary" onclick={() => downloadCsv(hist, 'replacement-history.csv')}><Icon name="download" size={14} />Export</button>{/snippet}
+    {#snippet actions()}{#if can.reports()}<button class="btn btn-primary" onclick={() => downloadCsv(hist, 'replacement-history.csv')}><Icon name="download" size={14} />Export</button>{/if}{/snippet}
   </PageHead>
   <div class="panel panel-pad">
     <DataTable id="history" placeholder="Agent, DID or manager" rows={hist} columns={histCols} pageSize={15} dense onrow={(r) => go('command', 'agent', { n: r.agent_number })}>
