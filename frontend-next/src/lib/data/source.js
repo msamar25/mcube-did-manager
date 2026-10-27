@@ -17,10 +17,11 @@ export const getInventory = pick(L.getInventory, P('P_getInventory'));
 export const getRequests = pick(L.getRequests, P('P_getRequests'));
 export const getRequestTimeline = pick(L.getRequestTimeline, P('P_getRequestTimeline'));
 export const getLogs = pick(L.getLogs, P('P_getLogs'));
+export const getLogsSince = pick(L.getLogsSince, P('P_getLogsSince'));
+export const getEmployeeDirectory = pick(L.getEmployeeDirectory, P('P_getEmployeeDirectory'));
 export const getSyncStatus = pick(L.getSyncStatus, () => P('P_getSyncStatus')().then((r) => ({ ...r, inventorySnapshot: r.jobs.find((j) => j.job === 'inventory')?.last_success_utc || '', initialized: true })));
 export const getSettings = pick(L.getSettings, P('P_getSettings'));
 export const getSettingsHistory = pick(L.getSettingsHistory, P('P_getSettingsHistory'));
-export const getAccessLog = pick(() => Promise.resolve({ items: [], unavailable: true }), P('P_getAccessLog')); // no endpoint for User_Activity_Logs yet
 export const getNotifications = pick(L.getNotifications, P('P_getNotifications'));
 export const getInsights = pick(L.getInsights, P('P_getInsights'));
 export const getAgentProfile = pick(L.getAgentProfile, P('P_getAgentProfile'));

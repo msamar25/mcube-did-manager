@@ -165,6 +165,7 @@ label.field small { color: var(--muted); font-weight: 400; }
 .badge.processing, .badge.info, .badge.approved, .badge.queued { background: var(--info-50); color: #1d55b3; }
 .badge.completed, .badge.ok, .badge.active { background: var(--ok-50); color: #0b7a3b; }
 .badge.failed, .badge.bad, .badge.critical, .badge.needs_reconciliation { background: var(--bad-50); color: #b42318; }
+.badge.neutral { background: #eef0f4; color: #4a5263; }
 .badge.rejected { background: #eef0f4; color: #4a5263; }
 .badge.review_required, .badge.attention { background: #f3ecff; color: #6d3fd1; }
 .badge.pool { background: var(--info-50); color: #1d55b3; }

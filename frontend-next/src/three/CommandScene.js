@@ -1,6 +1,6 @@
 // DID Command Center — real-time Three.js scene (v2).
 // Everything is modelled procedurally in ./parts: operator islands, the MCube hub, the DID pool vault,
-// the agent operations island, the replacement-flow status path, network lanes and the environment.
+// the agent operations island, the replacement ticket board, network lanes and the environment.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -14,7 +14,7 @@ import { facadeTextures, rackTextures, contactShadowTexture, laneTexture } from 
 import { LabelLayer } from './labels.js';
 import { buildLights, buildPlants } from './parts/environment.js';
 import { buildOffice, opCardHtml, LAYOUT } from './parts/office.js';
-import { buildStatusPath } from './parts/statusPath.js';
+import { buildTicketBoard } from './parts/ticketBoard.js';
 import { buildLinks } from './parts/links.js';
 import './scene.css';
 
@@ -126,7 +126,7 @@ export class CommandScene {
     this.mats = this._materials();
     buildOffice(this, w, h);
     const H = LAYOUT.hub, hub = { x: H[0], z: H[1], r: 8.6 };
-    buildStatusPath(this, [[-10.5, 10.5], [-9.5, 17.5], [-1, 20.5], [7, 20], [12.8, 15.5]]);
+    buildTicketBoard(this, [[-11, 17], [-3.7, 19.3], [3.7, 19.3], [11, 17]]); // boards side by side, like columns on a ticket wall
     buildLinks(this, [{ from: { x: LAYOUT.agents.x0 - 0.5, z: LAYOUT.agents.z0 + 2.6, r: 0 }, to: hub, color: '#22c55e', bend: -0.08 }]);
     buildPlants(this, [[-35, -21], [35, -21], [-35, 22], [36, 3], [-14, -4], [14, -4], ...this.plants]);
     this.fitCamera();
@@ -265,12 +265,13 @@ export class CommandScene {
     else if (sel.type === 'team') focus(new THREE.Vector3(-25, 0, 15), 1, 26, 3);
     else if (sel.type === 'pool') focus(this.poolNode.center, 3, 40);
     else if (sel.type === 'agents') focus(this.agentNode.center, 1, 40, 4);
+    else if (sel.type === 'flow' && sel.key && this.boards?.some((b) => b.col.key === sel.key)) { const b = this.boards.find((x) => x.col.key === sel.key); const nrm = new THREE.Vector3(Math.sin(b.yaw), 0, Math.cos(b.yaw)); this.flyTo(b.center.clone(), b.center.clone().add(nrm.multiplyScalar(12.5)).add(new THREE.Vector3(0, 2.2, 0))); } // straight in front of the board, close enough to read its tickets
     else if (sel.type === 'flow') focus(new THREE.Vector3(4, 0, 16), 1, 40);
     else if (sel.type === 'hub') focus(this.hub.center, 3, 42);
   }
 
   flyTo(target, pos, dur = 1.2) {
-    this.tween = { t: 0, dur, fromT: this.controls.target.clone(), fromP: this.camera.position.clone(), toT: target, toP: pos };
+    this.tween = { t: 0, dur, t0: performance.now(), fromT: this.controls.target.clone(), fromP: this.camera.position.clone(), toT: target, toP: pos };
   }
 
   setView(view) {
@@ -289,11 +290,11 @@ export class CommandScene {
 
   setData(data) {
     this.data = data;
+    this.updateBoards?.(data); // 3D ticket boards (canvas), independent of HTML labels
     if (!this.labelsOn) return;
     for (const op of data.operators || []) { const isl = this.islands.get(op.key); if (isl?.card) isl.card.innerHTML = opCardHtml(op); }
     const set = (root, k, v) => { const n = root?.querySelector(`[data-k="${k}"]`); if (n) n.textContent = Number(v ?? 0).toLocaleString('en-IN'); };
     set(this.hubLabel, 'total', data.total); set(this.poolLabel, 'pool', data.pool); set(this.agentLabel, 'agents', data.agents);
-    for (const g of this.gates || []) set(g.div, g.st.key, data.flow?.[g.st.key]);
   }
 
   fitCamera() {
@@ -339,7 +340,8 @@ export class CommandScene {
     const t = this.time;
     for (const u of this.updaters) u(this.reduced ? 1 : t, this.reduced ? 0 : dt); // reduced motion: scene holds still
     if (this.tween) {
-      const tw = this.tween; tw.t = Math.min(1, tw.t + dt / tw.dur);
+      // wall-clock progress, so slow devices still arrive on time
+      const tw = this.tween; tw.t = Math.min(1, (performance.now() - tw.t0) / (tw.dur * 1000));
       const e = tw.t < 0.5 ? 4 * tw.t ** 3 : 1 - (-2 * tw.t + 2) ** 3 / 2;
       this.controls.target.lerpVectors(tw.fromT, tw.toT, e);
       this.camera.position.lerpVectors(tw.fromP, tw.toP, e);

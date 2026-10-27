@@ -2,6 +2,7 @@
   import { db } from '../lib/store.svelte.js';
   import { route, go } from '../lib/router.svelte.js';
   import { ist, n, downloadCsv } from '../lib/format.js';
+  import { parseTs } from '../lib/calc.js';
   import PageHead from '../components/PageHead.svelte';
   import Icon from '../components/Icon.svelte';
   import Badge from '../components/Badge.svelte';
@@ -11,26 +12,20 @@
 
   let page = $derived(route.page);
   // audit log filters
-  let ev = $state('all'), result = $state('all'), q = $state(''), from = $state(''), to = $state('');
-  const events = [...new Set(db.logs.map((l) => l.event))].sort();
-  let logs = $derived(db.logs.filter((l) => (ev === 'all' || l.event === ev) && (result === 'all' || l.result === result) && (!from || l.time_utc.slice(0, 10) >= from) && (!to || l.time_utc.slice(0, 10) <= to) && `${l.batch_id} ${l.old_did} ${l.new_did} ${l.agent_name} ${l.agent_number}`.toLowerCase().includes(q.trim().toLowerCase())));
-  const logCols = [{ key: 'time_utc', label: 'Time (IST)', format: (v) => ist(v) }, { key: 'batch_id', label: 'Batch', mono: true }, { key: 'event', label: 'Event', custom: true }, { key: 'agent_name', label: 'Agent', strong: true }, { key: 'old_did', label: 'Old DID', mono: true }, { key: 'new_did', label: 'New DID', mono: true }, { key: 'result', label: 'Result', custom: true }, { key: 'details', label: 'Details' }];
+  let ev = $state('all'), result = $state('all'), from = $state(''), to = $state('');
+  // calendar day in IST, so the date filter matches what people see
+  const istDay = (v) => { const t = parseTs(v); return t === t && t ? new Date(t + 330 * 60e3).toISOString().slice(0, 10) : ''; };
+  let events = $derived([...new Set(db.logs.map((l) => l.event))].sort());
+  let results = $derived([...new Set(db.logs.map((l) => l.result).filter(Boolean))].sort());
+  let logs = $derived(db.logs.filter((l) => (ev === 'all' || l.event === ev) && (result === 'all' || l.result === result) && (!from || istDay(l.time_utc) >= from) && (!to || istDay(l.time_utc) <= to)));
+  const logCols = [{ key: 'time_utc', label: 'Time (IST)', format: (v) => ist(v), search: (r) => ist(r.time_utc) }, { key: 'batch_id', label: 'Batch', mono: true }, { key: 'event', label: 'Event', custom: true }, { key: 'agent_name', label: 'Agent', strong: true }, { key: 'old_did', label: 'Old DID', mono: true }, { key: 'new_did', label: 'New DID', mono: true }, { key: 'result', label: 'Result', custom: true }, { key: 'details', label: 'Details' }];
   // history
-  let hq = $state('');
-  let hist = $derived(db.history.filter((h) => `${h.agent_name} ${h.agent_number} ${h.old_did} ${h.new_did} ${h.manager_at_sync}`.toLowerCase().includes(hq.trim().toLowerCase())));
+  let hist = $derived(db.history);
   const histCols = [{ key: 'completed_at_ist', label: 'Completed (IST)', format: (v) => ist(v) }, { key: 'agent_name', label: 'Agent', strong: true }, { key: 'agent_number', label: 'Number', mono: true }, { key: 'operator', label: 'Operator', custom: true }, { key: 'old_did', label: 'Old DID', mono: true }, { key: 'new_did', label: 'New DID', mono: true }, { key: 'team_lead_at_sync', label: 'Team lead' }, { key: 'batch_id', label: 'Batch', mono: true }];
-  const EXPORTS = [
-    { title: 'DID inventory', sub: 'Active, pool and inactive snapshot', rows: () => db.inventory, file: 'did-inventory.csv', icon: 'list' },
-    { title: 'FIFO pool order', sub: 'Current DID_Pool_FIFO', rows: () => db.inventory.filter((i) => i.status === 'pool'), file: 'did-pool-fifo.csv', icon: 'pool' },
-    { title: 'Support requests', sub: 'All tickets with channel and status', rows: () => db.requests.map(({ source_counts, ...r }) => r), file: 'support-requests.csv', icon: 'inbox' },
-    { title: 'Change_Logs audit', sub: 'Every reassignment stage', rows: () => db.logs, file: 'change-logs.csv', icon: 'log' },
-    { title: 'Replacement history', sub: 'Verified completions', rows: () => db.history, file: 'replacement-history.csv', icon: 'history' },
-    { title: 'Access log', sub: 'Sign-ins and privileged actions', rows: () => db.accessLog, file: 'access-log.csv', icon: 'shieldok' }
-  ];
 </script>
 
 {#if page === 'audit'}
-  <PageHead title="Audit Log" sub="Append-only Change_Logs journal — every stage of every reassignment" eyebrow="Reports">
+  <PageHead title="Audit Log" eyebrow="Reports">
     {#snippet actions()}<button class="btn btn-primary" onclick={() => downloadCsv(logs, 'change-logs.csv')}><Icon name="download" size={14} />Export {n(logs.length)} rows</button>{/snippet}
   </PageHead>
   <div class="sum">
@@ -41,13 +36,11 @@
   <div class="panel panel-pad">
     <div class="bar">
       <select class="select" bind:value={ev} aria-label="Event"><option value="all">All events</option>{#each events as e}<option value={e}>{e}</option>{/each}</select>
-      <select class="select" bind:value={result} aria-label="Result"><option value="all">All results</option>{#each ['SUCCESS', 'STARTED', 'FAILED'] as r}<option value={r}>{r}</option>{/each}</select>
+      <select class="select" bind:value={result} aria-label="Result"><option value="all">All results</option>{#each results as r}<option value={r}>{r}</option>{/each}</select>
       <label class="dt">From<input class="input" type="date" bind:value={from} /></label>
       <label class="dt">To<input class="input" type="date" bind:value={to} /></label>
-      <div class="spacer"></div>
-      <div class="search sw"><Icon name="search" size={14} /><input class="input" placeholder="Batch, DID or agent" bind:value={q} /></div>
     </div>
-    <DataTable rows={logs} columns={logCols} pageSize={14} dense>
+    <DataTable id="audit" placeholder="Batch, DID or agent" rows={logs} columns={logCols} pageSize={14} dense>
       {#snippet cell(r, c)}
         {#if c.key === 'event'}<span class="ev" class:ok={r.event === 'REASSIGNMENT_COMPLETE'} class:bad={r.result === 'FAILED'}>{r.event}</span>
         {:else if c.key === 'result'}<Badge status={r.result === 'SUCCESS' ? 'ok' : r.result === 'FAILED' ? 'bad' : 'info'} label={r.result} />{/if}
@@ -55,25 +48,13 @@
     </DataTable>
   </div>
 {:else if page === 'history'}
-  <PageHead title="Replacement History" sub="Verified completions from Agent_Replacement_History" eyebrow="Reports">
-    {#snippet actions()}<div class="search sw"><Icon name="search" size={14} /><input class="input" placeholder="Agent, DID or manager" bind:value={hq} /></div><button class="btn btn-primary" onclick={() => downloadCsv(hist, 'replacement-history.csv')}><Icon name="download" size={14} />Export</button>{/snippet}
+  <PageHead title="Replacement History" eyebrow="Reports">
+    {#snippet actions()}<button class="btn btn-primary" onclick={() => downloadCsv(hist, 'replacement-history.csv')}><Icon name="download" size={14} />Export</button>{/snippet}
   </PageHead>
   <div class="panel panel-pad">
-    <DataTable rows={hist} columns={histCols} pageSize={15} dense onrow={(r) => go('command', 'agent', { n: r.agent_number })}>
+    <DataTable id="history" placeholder="Agent, DID or manager" rows={hist} columns={histCols} pageSize={15} dense onrow={(r) => go('command', 'agent', { n: r.agent_number })}>
       {#snippet cell(r)}<OpChip name={r.operator} />{/snippet}
     </DataTable>
-  </div>
-{:else}
-  <PageHead title="Exports" sub="Download CSV snapshots. Values starting with = + - @ are escaped for spreadsheet safety." eyebrow="Reports" />
-  <div class="ex">
-    {#each EXPORTS as x}
-      <div class="panel panel-pad card">
-        <span class="ic"><Icon name={x.icon} size={18} /></span>
-        <div><b>{x.title}</b><small>{x.sub}</small></div>
-        <span class="muted tnum">{n(x.rows().length)} rows</span>
-        <button class="btn btn-sm" onclick={() => { downloadCsv(x.rows(), x.file); toast(`${x.file} downloaded`); }}><Icon name="download" size={13} />CSV</button>
-      </div>
-    {/each}
   </div>
 {/if}
 

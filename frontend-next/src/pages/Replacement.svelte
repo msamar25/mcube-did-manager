@@ -28,18 +28,19 @@
   let pool = $derived(db.inventory.filter((i) => i.status === 'pool').sort((a, b) => a.fifo - b.fifo));
   let lastBatch = $derived(db.logs.find((l) => l.event === 'BATCH_COMPLETE' || l.event === 'BATCH_STOPPED'));
   const columns = [
-    { key: 'ticket_no', label: 'Ticket', mono: true, strong: true },
-    { key: 'agent_name', label: 'Agent', custom: true },
+    { key: 'ticket_no', label: 'Ticket', mono: true, strong: true, lock: true },
+    { key: 'agent_name', label: 'Agent', custom: true, minWidth: '190px', search: (r) => `${r.agent_name} ${r.agent_number}` },
     { key: 'current_did', label: 'Current DID', mono: true },
     { key: 'operator', label: 'Operator', custom: true },
-    { key: 'request_source', label: 'Source', custom: true },
-    { key: 'status', label: 'Status', custom: true },
+    { key: 'request_source', label: 'Source', custom: true, search: (r) => SOURCES[r.request_source] || '' },
+    { key: 'status', label: 'Status', custom: true, search: (r) => String(r.status).replace(/_/g, ' ') },
     { key: 'first_call_utc', label: 'Waiting', custom: true }
   ];
+  const SOURCES = { call: 'Call', form: 'Form', both: 'Call + Form', unknown: '—' };
   const STAGES = [['Fresh inventory', 'Pull active, inactive & pool lists from MCube'], ['Deactivate', 'Release the agent\'s current DID'], ['Activate', 'Assign the next FIFO pool DID'], ['Verify', 'Re-read inventory; stop if not confirmed'], ['Record', 'Append Change_Logs + history; notify']];
 </script>
 
-<PageHead title="Replacement Queue" sub="Pending requests and safe, sequential DID reassignment" eyebrow="Command Center">
+<PageHead title="Replacement Queue" eyebrow="Command Center">
   {#snippet actions()}
     <button class="btn btn-primary" disabled={!chosen.length} onclick={() => (open = true)}><Icon name="swap" size={14} />Reassign selected ({chosen.length})</button>
   {/snippet}
@@ -69,11 +70,11 @@
       </div>
       <span class="muted sm">{tab === 'ready' ? 'Oldest first. Select up to the available pool size.' : tab === 'review' ? 'Replaced within 3 days or flagged — review before reassigning.' : tab === 'failed' ? 'Batch stopped. Reconcile with MCube before retrying.' : 'Running in the single background worker.'}</span>
     </div>
-    <DataTable rows={[...rows].sort((a, b) => String(a.first_call_utc).localeCompare(String(b.first_call_utc)))} {columns} pageSize={11} rowKey={(r) => r.request_id} selectable={tab === 'ready'} bind:selected canSelect={(r) => r.status === 'approved' || !recentlyReplaced(r)}>
+    <DataTable id="replacement" placeholder="Ticket, agent, number or DID" rows={[...rows].sort((a, b) => String(a.first_call_utc).localeCompare(String(b.first_call_utc)))} {columns} pageSize={11} rowKey={(r) => r.request_id} selectable={tab === 'ready'} bind:selected canSelect={(r) => r.status === 'approved' || !recentlyReplaced(r)}>
       {#snippet cell(r, c)}
         {#if c.key === 'agent_name'}<Person name={r.agent_name} sub={r.agent_number} size={24} onclick={(e) => { e.stopPropagation(); go('command', 'agent', { n: r.agent_number }); }} />
         {:else if c.key === 'operator'}<OpChip name={r.operator} />
-        {:else if c.key === 'request_source'}<span class="src">{#if r.source_counts.call}<span title="Calls"><Icon name="phone" size={12} />{r.source_counts.call}</span>{/if}{#if r.source_counts.form}<span title="Forms"><Icon name="form" size={12} />{r.source_counts.form}</span>{/if}</span>
+        {:else if c.key === 'request_source'}<span class="src">{#if r.source_counts?.call}<span title="Calls"><Icon name="phone" size={12} />{r.source_counts.call}</span>{/if}{#if r.source_counts?.form}<span title="Forms"><Icon name="form" size={12} />{r.source_counts.form}</span>{/if}{#if !r.source_counts?.call && !r.source_counts?.form}<span class="faint">—</span>{/if}</span>
         {:else if c.key === 'status'}<Badge status={r.status} />{#if recentlyReplaced(r)}<span class="warn-t" title="Replaced recently (within the configured recent-replacement window)"><Icon name="alert" size={12} /></span>{/if}
         {:else if c.key === 'first_call_utc'}<span class="muted">{ago(r.first_call_utc)}</span>{/if}
       {/snippet}
@@ -95,7 +96,6 @@
     <div class="panel panel-pad">
       <div class="panel-title" style="margin-bottom:10px">How each agent is processed</div>
       <ol class="stages">{#each STAGES as [s, d], i}<li><span class="n">{i + 1}</span><div><b>{s}</b><small>{d}</small></div></li>{/each}</ol>
-      <div class="note warn"><Icon name="shield" size={14} />Uncertain or timed-out steps are never retried automatically.</div>
     </div>
   </aside>
 </div>

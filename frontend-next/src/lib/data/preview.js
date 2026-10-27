@@ -11,6 +11,8 @@ export const P_getRequestTimeline = (id) => delay({                             
   events: M.ticketEvents.filter((e) => e.request_id === id)
 });
 export const P_getLogs = () => delay({ items: M.changeLogs.slice(0, 500) });                   // GET /api/logs (backend returns the latest 500 rows)
+export const P_getLogsSince = (days) => delay({ items: M.changeLogs.filter((l) => Date.now() - Date.parse(l.time_utc) < days * 864e5), full: true });
+export const P_getEmployeeDirectory = () => delay({ items: M.employees.map((e, i) => ({ ...e, status: i % 9 === 4 ? '0' : '1' })) });
 export const P_getSyncStatus = () => delay({ jobs: M.syncJobs });                              // GET /api/jobs/status + /api/inventory/status
 export const P_getSettings = () => delay({ settings: M.settings, version: 'v-demo' });         // GET /api/settings (admin)
 export const P_getSettingsHistory = () => delay({ items: M.settingsHistory });                 // GET /api/settings/history

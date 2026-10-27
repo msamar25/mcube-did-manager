@@ -65,18 +65,18 @@
 </script>
 
 <Modal {open} onclose={() => { if (phase !== 'running' && phase !== 'submitting') onclose(); }} title="Reassign {plan.length} agent{plan.length === 1 ? '' : 's'} · FIFO" width={680}>
-  {#if !LIVE}<div class="note warn"><Icon name="info" size={15} /><span><b>Design preview.</b> Running here is a visual simulation only. Live, this sends the request to the backend queue, which processes one agent at a time.</span></div>{/if}
+  {#if !LIVE}<div class="note warn"><Icon name="info" size={15} /><span>Preview: simulation only.</span></div>{/if}
   {#if items.length > pool.length}<div class="note bad"><Icon name="alert" size={15} />Only {pool.length} DIDs are available in the pool. {items.length - pool.length} selected agent{items.length - pool.length === 1 ? '' : 's'} will not be included.</div>{/if}
   {#if error}<div class="note bad" role="alert"><Icon name="alert" size={15} /><span>{error}</span></div>{/if}
   {#if phase === 'running' || phase === 'done'}
     <div class="note {queueStatus === 'needs_reconciliation' ? 'bad' : phase === 'done' ? '' : 'warn'}"><Icon name={phase === 'done' ? 'check' : 'clock'} size={15} /><span>
       {#if phase === 'done'}{queueStatus === 'completed' ? 'Finished.' : 'Stopped for reconciliation. Check the agent in MCube, then acknowledge the batch in Settings → Advanced.'}
-      {:else}{queueStatus === 'pending' ? 'Queued — waiting for the worker.' : `Working… ${batch?.done ?? 0} of ${batch?.total ?? plan.length} done.`} You can keep this open; the backend continues even if you close it.{/if}
+      {:else}{queueStatus === 'pending' ? 'Queued — waiting for the worker.' : `Working… ${batch?.done ?? 0} of ${batch?.total ?? plan.length} done.`}{/if}
     </span></div>
   {/if}
   <div class="plan scroll-y">
     <table class="tbl">
-      <thead><tr><th>Agent</th><th>Current DID</th><th></th><th>Expected next FIFO DID</th><th>Progress</th></tr></thead>
+      <thead><tr><th>Agent</th><th>Current DID</th><th></th><th>Next FIFO DID</th><th>Progress</th></tr></thead>
       <tbody>
         {#each plan as p}
           <tr>
@@ -90,14 +90,7 @@
       </tbody>
     </table>
   </div>
-  <p class="muted small">The backend picks the actual DID at run time from a fresh MCube pool list, so it can differ from the expected one if the pool changed.</p>
-  <ul class="checks">
-    <li><Icon name="shieldok" size={14} />Fresh MCube inventory before every agent</li>
-    <li><Icon name="shieldok" size={14} />Stops on the first failed or uncertain step — never retried blindly</li>
-    <li><Icon name="shieldok" size={14} />Each stage is appended to Change_Logs</li>
-    <li><Icon name="shieldok" size={14} />Single worker; one batch at a time</li>
-  </ul>
-  {#if phase === 'confirm'}<label class="ack"><input type="checkbox" bind:checked={ack} /> I confirm these agents should receive the next FIFO DIDs.</label>{/if}
+  {#if phase === 'confirm'}<label class="ack"><input type="checkbox" bind:checked={ack} /> Confirm replacement</label>{/if}
   {#snippet footer()}
     <button class="btn" disabled={phase === 'running' || phase === 'submitting'} onclick={onclose}>{phase === 'done' ? 'Close' : 'Cancel'}</button>
     {#if phase !== 'done'}<button class="btn btn-primary" disabled={!ack || phase !== 'confirm' || !plan.length} onclick={submit}><Icon name="play" size={14} />{phase === 'submitting' ? 'Submitting…' : phase === 'running' ? 'Running…' : LIVE ? 'Start replacement' : 'Run simulation'}</button>{/if}

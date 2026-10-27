@@ -12,12 +12,13 @@
   let t = $derived(totals());
   let rules = $state({ ...DEFAULT_RULES }), q = $state(''), sev = $state('all'), passport = $state(null), stamp = $state(Date.now());
   let alerts = $derived(computeAlerts({ operators: ops, agents: db.insights?.agents || [], requests: db.requests, duplicates: t.duplicates, lastSync: db.lastSync, inventory: db.inventory }, rules, stamp));
-  let visible = $derived(alerts.filter((a) => (sev === 'all' || a.severity === sev) && `${a.kind} ${a.subject} ${a.detail}`.toLowerCase().includes(q.trim().toLowerCase())));
+  let visible = $derived(alerts.filter((a) => (sev === 'all' || a.severity === sev) && String(qIn === 'all' ? `${a.kind} ${a.subject} ${a.detail}` : a[qIn] || '').toLowerCase().includes(q.trim().toLowerCase())));
+  let qIn = $state('all');
   const count = (s) => alerts.filter((a) => a.severity === s).length;
   let kinds = $derived([...new Set(alerts.map((a) => a.kind))].map((k) => [k, alerts.filter((a) => a.kind === k).length]));
 </script>
 
-<PageHead title="Risk Radar" sub="Rule-based early warnings from synced data — no predictions, no extra MCube calls" eyebrow="Command Center">
+<PageHead title="Risk Radar" eyebrow="Command Center">
   {#snippet actions()}
     <button class="btn" onclick={() => (stamp = Date.now())}><Icon name="refresh" size={14} />Recalculate</button>
     <button class="btn btn-primary" disabled={!visible.length} onclick={() => downloadCsv(visible.map((a) => ({ severity: a.severity, category: a.kind, subject: a.subject, detail: a.detail, agent_number: a.agent_number || '', did: a.did || '', generated_utc: new Date(stamp).toISOString() })), 'did-risk-alerts.csv')}><Icon name="download" size={14} />Export alerts</button>
@@ -34,7 +35,6 @@
 <div class="layout">
   <aside class="panel panel-pad rules">
     <div class="panel-title">Detection rules</div>
-    <p class="muted">Adjust for analysis. Not saved, and never applied to replacement logic.</p>
     <label class="field">Low operator pool<input class="input" type="number" min="0" bind:value={rules.minPool} /><small>Flag operators with fewer available DIDs</small></label>
     <label class="field">Agent request count<input class="input" type="number" min="2" bind:value={rules.repeatLimit} /><small>Flag agents with at least this many requests</small></label>
     <label class="field">Pending request age<select class="select" bind:value={rules.ageingHours}>{#each [8, 12, 24, 48, 72] as h}<option value={h}>{h} hours</option>{/each}</select></label>
@@ -45,7 +45,7 @@
     <div class="bar">
       <div class="seg">{#each ['all', 'Critical', 'Attention', 'Review', 'Unknown'] as s}<button class:on={sev === s} onclick={() => (sev = s)}>{s === 'all' ? 'All' : s}</button>{/each}</div>
       <div class="spacer"></div>
-      <div class="search"><Icon name="search" size={14} /><input class="input" placeholder="Search alerts" bind:value={q} aria-label="Search alerts" /></div>
+      <div class="search"><Icon name="search" size={14} /><input class="input" placeholder="Search alerts" bind:value={q} aria-label="Search alerts" /></div><select class="select" style="width:auto" bind:value={qIn} aria-label="Search in"><option value="all">In all</option><option value="kind">Type</option><option value="subject">Subject</option><option value="detail">Detail</option></select>
     </div>
     <div class="list scroll-y">
       {#each visible.slice(0, 150) as a}
@@ -58,9 +58,8 @@
             {#if a.kind === 'Pool capacity'}<button class="btn btn-sm" onclick={() => go('command', 'pool')}>Pool</button>{/if}
           </div>
         </article>
-      {:else}<div class="empty">No alerts match. An empty list doesn't guarantee data quality.</div>{/each}
+      {:else}<div class="empty">No alerts.</div>{/each}
     </div>
-    <div class="note" style="margin-top:10px"><Icon name="info" size={14} />Alerts use current inventory, stored request timestamps, recorded request counts and the last sync time. They don't forecast depletion or infer missing history.</div>
   </section>
 </div>
 <DidPassport did={passport} onclose={() => (passport = null)} />

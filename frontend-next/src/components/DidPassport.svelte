@@ -26,7 +26,6 @@
         {:else}<div class="muted">No logged operations for this DID.</div>{/each}
       </div>
     </div>
-    <div class="note"><Icon name="info" size={14} />History exists only where Change_Logs recorded it. Earlier periods are unknown.</div>
   {/if}
 </Drawer>
 <style>

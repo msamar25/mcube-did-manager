@@ -67,25 +67,15 @@ class LoginVerify(BaseModel):
 @app.post('/api/auth/start')
 async def login_start(payload: LoginStart):
     email=payload.email.strip().lower()
-    roles={os.getenv('ADMIN_EMAIL','').strip().lower():'admin',os.getenv('OPERATOR_EMAIL','').strip().lower():'operator'}
-    roles.pop('',None)
-    role=roles.get(email)
-    user_hash=None
-    # Additional operators have distinct identities and PINs. Never share operator credentials.
-    if not role:
-        try:
-            operator_users=json.loads(os.getenv('OPERATOR_USERS_JSON','[]'))
-            if not isinstance(operator_users,list): raise ValueError()
-            for entry in operator_users:
-                if str(entry.get('email','')).strip().lower()==email:
-                    role='operator';user_hash=str(entry.get('pin_hash',''));break
-        except (ValueError,TypeError,AttributeError):
-            raise HTTPException(503,'Invalid OPERATOR_USERS_JSON configuration')
+    # v88: identities come from the platform layer (environment users + User Management).
+    # With empty Platform_* tabs this is exactly the previous environment-variable behaviour.
+    lookup=await asyncio.to_thread(platform.login_lookup,email)
+    role,user_hash,pin_role=lookup if lookup else (None,None,None)
     # Throttle attempts before validating the PIN to limit guessing.
     now=time.time(); recent=[t for t in OTP_RATE.get(email,[]) if now-t<900]
     if len(recent)>=5:raise HTTPException(429,'Too many attempts; try later')
     recent.append(now);OTP_RATE[email]=recent
-    if not role or not _pin_ok(payload.pin,role,user_hash):raise HTTPException(401,'Invalid login details')
+    if not role or not _pin_ok(payload.pin,pin_role,user_hash):raise HTTPException(401,'Invalid login details')
     if not os.getenv('SESSION_SECRET') or len(os.environ['SESSION_SECRET'])<32:
         raise HTTPException(503,'SESSION_SECRET must be configured')
     challenge=secrets.token_urlsafe(24);otp=f'{secrets.randbelow(1000000):06d}'
@@ -112,12 +102,19 @@ async def login_verify(payload: LoginVerify):
     if not hmac.compare_digest(actual,record['digest']):raise HTTPException(401,'Invalid OTP')
     OTP_CHALLENGES.pop(payload.challenge_id,None)
     await asyncio.to_thread(_safe_access_log, record['email'], record['role'], 'LOGIN_SUCCESS', '/api/auth/verify', 'SUCCESS')
-    return {'token':_sign({'kind':'session','role':record['role'],'email':record['email'],'exp':int(time.time()+8*3600)}),'role':record['role'],'expires_in':28800}
+    hours=await asyncio.to_thread(platform.session_hours)
+    return {'token':_sign({'kind':'session','role':record['role'],'email':record['email'],'exp':int(time.time()+hours*3600)}),'role':record['role'],'expires_in':hours*3600}
 
-async def auth(authorization: str | None = Header(None)):
+async def identity(authorization: str | None = Header(None)):
+    """Any signed-in user (platform level: launcher, own reports)."""
     supplied=(authorization or '').removeprefix('Bearer ').strip()
     if not supplied:raise HTTPException(401,'Login required')
-    return _verify(supplied)['role']
+    return _verify(supplied)
+
+async def auth(authorization: str | None = Header(None)):
+    """DID Replacement app access. Returns the user's role inside the DID app (admin/operator)."""
+    ident=await identity(authorization)
+    return await asyncio.to_thread(platform.did_role,ident.get('email',''),ident.get('role',''))
 
 async def admin_only(role=Depends(auth)):
     if role!='admin':raise HTTPException(403,'Administrator permission required')
@@ -220,7 +217,7 @@ async def identity_audit_middleware(request: Request, call_next):
     return response
 
 @app.post('/api/auth/logout')
-async def logout(role=Depends(auth)):
+async def logout(ident=Depends(identity)):
     # Middleware records the identity and logout action. The client then discards its token.
     return {'ok':True}
 
@@ -369,11 +366,20 @@ async def snapshot(lists):
 
 import sys
 work=Workflows(sys.modules[__name__])
+from .platform_access import Platform
+platform=Platform(sys.modules[__name__])
 
-@app.get('/api/me',dependencies=[Depends(auth)])
-async def me(authorization: str | None = Header(None)):
-    identity=_verify((authorization or '').removeprefix('Bearer ').strip())
-    return {'role':identity['role'],'email':identity.get('email','')}
+@app.get('/api/me')
+async def me(ident=Depends(identity)):
+    # role = DID app role (kept for the previous UI); apps = what the launcher shows.
+    try:
+        info=await asyncio.to_thread(platform.me,ident.get('email',''),ident.get('role',''))
+    except HTTPException:raise
+    except Exception:
+        log.exception('Platform profile unavailable')
+        info={'email':ident.get('email',''),'apps':[],'degraded':True}
+    did=next((a for a in info.get('apps',[]) if a['id']=='did'),None)
+    return {**info,'role':(did or {}).get('role') or ident['role'],'email':ident.get('email','')}
 
 @app.get('/api/settings',dependencies=[Depends(auth)])
 async def get_settings(role=Depends(auth)):
@@ -1152,9 +1158,19 @@ def snapshot_sync(lists):
 async def batch_status(): return dict(state)
 
 @app.get('/api/logs',dependencies=[Depends(auth)])
-async def logs():
-    try: return {'items':(await asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS))[-500:]}
+async def logs(days: int = 0):
+    # Default unchanged (last 500 rows). ?days=N (1-120) returns every row of the last N days (max 20000) for trends/reports.
+    try: rows=await asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS)
     except Exception: raise HTTPException(503,'Cannot read audit log')
+    if days<=0:return {'items':rows[-500:]}
+    cutoff=datetime.now(IST)-timedelta(days=min(120,days))
+    def recent(r):
+        try:
+            t=datetime.fromisoformat(str(r.get('time_utc','')).replace('Z','+00:00'))
+            return (t if t.tzinfo else t.replace(tzinfo=timezone.utc))>=cutoff
+        except ValueError:return False
+    out=[r for r in rows if recent(r)][-20000:]
+    return {'items':out,'days':min(120,days),'truncated':len(out)==20000}
 
 def sync_agent_replacement_history():
     """Idempotent reconciliation from the authoritative Change_Logs journal.
@@ -1533,6 +1549,86 @@ async def run_batch(batch,dids,request_map,lease):
     finally:
         state['running']=False
         await lock.release(lease)
+
+# ---------------- v88 platform: launcher, users, app access, settings, saved reports ----------------
+async def platform_admin(ident=Depends(identity)):
+    me_=await asyncio.to_thread(platform.resolve,ident.get('email',''))
+    if not platform.can_manage(me_):raise HTTPException(403,'User Management permission required')
+    return me_
+
+class PlatformUserInput(BaseModel):
+    email: str = Field(min_length=3,max_length=200)
+    display_name: str = Field(default='',max_length=120)
+    status: Literal['active','disabled'] = 'active'
+    pin: str = Field(default='',max_length=8)
+    default_app: str = Field(default='',max_length=20)
+    notes: str = Field(default='',max_length=300)
+    apps: dict[str,str] = Field(default_factory=dict)
+
+class PlatformSettingsInput(BaseModel):
+    scope: str = Field(min_length=1,max_length=20)
+    values: dict[str,str|int|bool|None]
+
+class SavedReportInput(BaseModel):
+    id: str = Field(default='',max_length=40)
+    name: str = Field(min_length=1,max_length=80)
+    dataset: str = Field(min_length=1,max_length=40)
+    app_id: str = Field(default='did',max_length=20)
+    shared: bool = False
+    config: dict = Field(default_factory=dict)
+
+def _platform_call(fn,*args):
+    try:return fn(*args)
+    except HTTPException:raise
+    except Exception as exc:
+        log.exception('Platform sheet operation failed')
+        raise HTTPException(503,'Google Sheets is unavailable; try again shortly') from exc
+
+@app.get('/api/platform/users')
+async def platform_users(admin=Depends(platform_admin)):
+    return await asyncio.to_thread(_platform_call,platform.list_users)
+
+@app.post('/api/platform/users')
+async def platform_save_user(body:PlatformUserInput,admin=Depends(platform_admin)):
+    return await asyncio.to_thread(_platform_call,platform.save_user,admin,body.model_dump())
+
+@app.get('/api/platform/settings')
+async def platform_settings(admin=Depends(platform_admin)):
+    return await asyncio.to_thread(_platform_call,platform.get_all_settings)
+
+@app.put('/api/platform/settings')
+async def platform_save_settings(body:PlatformSettingsInput,admin=Depends(platform_admin)):
+    return await asyncio.to_thread(_platform_call,platform.save_settings,admin['email'],body.scope,body.values)
+
+@app.get('/api/platform/audit')
+async def platform_audit(admin=Depends(platform_admin)):
+    return {'items':await asyncio.to_thread(_platform_call,platform.audit_rows)}
+
+@app.get('/api/platform/access-log')
+async def platform_access_log(admin=Depends(platform_admin)):
+    rows=await asyncio.to_thread(_platform_call,get_rows,'User_Activity_Logs',ACCESS_HEADERS)
+    return {'items':list(reversed(rows[-1000:]))}
+
+@app.get('/api/platform/reports')
+async def platform_reports(ident=Depends(identity)):
+    return {'items':await asyncio.to_thread(_platform_call,platform.list_reports,ident.get('email',''))}
+
+@app.post('/api/platform/reports')
+async def platform_save_report(body:SavedReportInput,ident=Depends(identity)):
+    return await asyncio.to_thread(_platform_call,platform.save_report,ident.get('email',''),body.model_dump())
+
+@app.delete('/api/platform/reports/{report_id}')
+async def platform_delete_report(report_id:str,ident=Depends(identity)):
+    return await asyncio.to_thread(_platform_call,platform.delete_report,ident.get('email',''),report_id)
+
+@app.get('/api/employees',dependencies=[Depends(auth)])
+async def employee_directory():
+    """Read-only Employee_Directory (MCube employee sync) for Agent 360 active / deactivated lists."""
+    try:rows=await asyncio.to_thread(work.employees)
+    except Exception as exc:raise HTTPException(503,'Unable to read Employee_Directory') from exc
+    keep=('agent_number','agent_name','email','role','status','role3','role4','role5','updated_utc','agent_id')
+    return {'items':[{k:str(r.get(k,'')) for k in keep} for r in rows]}
+
 
 if BASE.exists():
     app.mount('/assets',StaticFiles(directory=BASE/'assets'),name='assets')

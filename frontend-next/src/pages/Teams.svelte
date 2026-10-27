@@ -13,7 +13,7 @@
   let rows = $derived(teams.filter((t) => mgr === 'all' || t.manager === mgr));
   const columns = [{ key: 'team_lead', label: 'Team lead', strong: true }, { key: 'manager', label: 'Manager' }, { key: 'agents', label: 'Agents w/ requests', num: true }, { key: 'requests', label: 'Requests', num: true }, { key: 'calls', label: 'Calls', num: true }, { key: 'completed', label: 'Completed', num: true }, { key: 'rate', label: 'Completion', num: true, custom: true }];
 </script>
-<PageHead title="Team Performance" sub="Request demand and completion by manager and team lead" eyebrow="Analytics">
+<PageHead title="Team Performance" eyebrow="Analytics">
   {#snippet actions()}<button class="btn" onclick={() => downloadCsv(teams, 'team-performance.csv')}><Icon name="download" size={14} />Export</button>{/snippet}
 </PageHead>
 <div class="layout">
@@ -27,7 +27,7 @@
     </div>
   </div>
   <div class="panel panel-pad">
-    <DataTable {rows} {columns} pageSize={14}>
+    <DataTable id="teams" {rows} {columns} pageSize={14}>
       {#snippet cell(r)}<div class="rt"><Meter value={r.rate} color="var(--ok)" /><b>{r.rate}%</b></div>{/snippet}
     </DataTable>
   </div>

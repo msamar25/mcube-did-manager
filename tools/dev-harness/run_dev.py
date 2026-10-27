@@ -4,7 +4,8 @@
 
 * Never uses real credentials and never contacts Google, MCube or Brevo.
 * All data below is synthetic (made-up numbers and names); operator names match production.
-* Login: admin@dev.local / PIN 2468 and operator@dev.local / PIN 1357. The OTP is printed to the
+* Login: admin@dev.local / PIN 2468 (super admin), operator@dev.local / PIN 1357, lead@dev.local / PIN 8642
+  (a User Management user). The OTP is printed to the
   console and written to tools/dev-harness/.last_otp (instead of being emailed).
 """
 import asyncio, hashlib, json, os, random, sys, threading
@@ -77,7 +78,12 @@ ws('Active_DIDs', M.DID_HEADERS, [[r['did_no'], r['agent_name'], r['agent_no'], 
 ws('Inactive_DIDs', M.DID_HEADERS, [[r['did_no'], '', '', r['operator']] for r in inactive])
 ws('DID_Pool_FIFO', M.FIFO_HEADERS, [[i + 1, r['did_no'], r['operator'], 'yes', ist(now - timedelta(hours=3))] for i, r in enumerate(pool)])
 ws('Sync_Status', ['last_sync_utc', 'active', 'inactive', 'pool'], [[ist(now - timedelta(hours=3)), len(active), len(inactive), len(pool)]])
-ws('Employee_Directory', W.EMP_HEADERS, [[e['emp_phone'], e['emp_name'], e['emp_email'], ist(now - timedelta(days=1)), e['agent_id'], e['role'], 1, '', 'TL ' + e['emp_name'][-1], 'Manager ' + str(e['role'])] for e in employees])
+# Agent 360 drills: employee #2 is deactivated in MCube (status 0); employee #3 left the directory but still holds a DID.
+ws('Employee_Directory', W.EMP_HEADERS, [[e['emp_phone'], e['emp_name'], e['emp_email'], ist(now - timedelta(days=1)), e['agent_id'], e['role'], 0 if k == 2 else 1, '', 'TL ' + e['emp_name'][-1], 'Manager ' + str(e['role'])] for k, e in enumerate(employees) if k != 3])
+# A user added in User Management (sheet PIN 8642), DID operator only.
+ws('Platform_Users', ['email', 'display_name', 'status', 'pin_hash', 'default_app', 'created_utc', 'created_by', 'updated_utc', 'updated_by', 'notes'],
+   [['lead@dev.local', 'Dev Lead', 'active', pin_hash('8642'), '', ist(now), 'admin@dev.local', ist(now), 'admin@dev.local', '']])
+ws('Platform_App_Access', ['email', 'app_id', 'app_role', 'status', 'updated_utc', 'updated_by'], [['lead@dev.local', 'did', 'operator', 'granted', ist(now), 'admin@dev.local']])
 ws('App_Settings', W.SETTINGS_HEADERS, [[k, json.dumps(v)] for k, v in {**W.DEFAULTS, 'auto_inventory_minutes': 5, 'auto_calls_minutes': 5, 'recent_replacement_days': 1}.items()])
 
 # history: a few verified replacements over the last week (old DID now inactive, new DID now active)
@@ -103,7 +109,13 @@ for k, status in enumerate(['pending', 'pending', 'approved', 'review_required',
 ws('Change_Logs', M.LOG_HEADERS, logs)
 ws('Pending_Requests', W.REQUEST_HEADERS, [[r[h] for h in W.REQUEST_HEADERS] for r in reqs])
 ws('Sync_Jobs', M.SYNC_JOB_HEADERS, [[j, ist(now - timedelta(hours=3)), ist(now - timedelta(hours=3)), 'success', 'ok'] for j in ('calls', 'inventory', 'employees', 'recovery')])
-for title, header in [('Operation_Queue', M.QUEUE_HEADERS), ('Call_Request_Events', W.CALL_HEADERS), ('Ticket_Events', W.TICKET_EVENT_HEADERS), ('Notification_Logs', W.NOTIFY_HEADERS),
+# notification rows in the same formats the backend writes
+q = reqs[6]
+ws('Notification_Logs', W.NOTIFY_HEADERS, [
+    [ist(now - timedelta(days=2)), q['request_id'], 'call_queued', '8071439545', 'submitted', 'exenumber=' + q['agent_number'] + '; {"callid": "' + q['agent_number'] + '1792747338", "msg": "Call Initiated Sucessfully"}'],
+    [ist(now - timedelta(hours=5)), q['request_id'], 'call_reminder', q['agent_number'], 'rejected', '{"callid": "", "msg": "Invalid Request or Executive is not opted for Outbound Calls or agent is in oncall"}'],
+    [ist(now - timedelta(hours=1)), reqs[9]['request_id'], 'review', 'admin', 'rejected', 'Recent replacement - request declined']])
+for title, header in [('Operation_Queue', M.QUEUE_HEADERS), ('Call_Request_Events', W.CALL_HEADERS), ('Ticket_Events', W.TICKET_EVENT_HEADERS),
                       ('Workflow_Sync', W.SYNC_HEADERS), ('Settings_Audit_Log', W.SETTING_LOG_HEADERS), ('User_Activity_Logs', M.ACCESS_HEADERS), ('Agent_Replacement_History', M.AGENT_HISTORY_HEADERS),
                       ('Request_Mutations', W.REQUEST_MUTATION_HEADERS), ('Public_Request_Events', M.PUBLIC_REQUEST_EVENTS)]:
     ws(title, header)

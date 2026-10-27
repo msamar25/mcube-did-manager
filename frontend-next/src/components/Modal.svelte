@@ -1,11 +1,12 @@
 <script>
   import Icon from './Icon.svelte';
+  import { portal } from '../lib/portal.js';
   let { open = false, title = '', onclose = () => {}, children, footer, width = 460 } = $props();
   function key(e) { if (e.key === 'Escape' && open) onclose(); }
 </script>
 <svelte:window onkeydown={key} />
 {#if open}
-  <div class="wrap" role="presentation" onclick={(e) => e.target === e.currentTarget && onclose()}>
+  <div class="wrap" use:portal role="presentation" onclick={(e) => e.target === e.currentTarget && onclose()}>
     <div class="modal" style="--w:{width}px" role="dialog" aria-modal="true" aria-label={title}>
       <header><h3>{title}</h3><button class="btn btn-icon btn-ghost" onclick={onclose} aria-label="Close"><Icon name="x" /></button></header>
       <div class="body">{@render children?.()}</div>

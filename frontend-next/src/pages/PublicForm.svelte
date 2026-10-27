@@ -15,7 +15,7 @@
   }
 </script>
 
-<PageHead title="Public Request Form" sub="What agents see at /support-request — preview only, submissions are not sent" eyebrow="Support" />
+<PageHead title="Public Request Form" eyebrow="Support" />
 
 <div class="wrap">
   <div class="phone">
@@ -27,7 +27,7 @@
           <h3>Request received</h3>
           <p>Your ticket number is</p>
           <b class="mono tk">SH-PREVIEW0001</b>
-          <p class="muted">If you also called the request line, both are merged into this ticket. You'll be contacted when your DID is replaced.</p>
+          <p class="muted">You'll be contacted when your DID is replaced.</p>
           <button class="btn" onclick={() => { sent = false; f = { agent_number: '', employee_name: '', email: '', issue_summary: '' }; }}>Submit another</button>
         </div>
       {:else}
@@ -44,21 +44,10 @@
       {/if}
     </div>
   </div>
-  <div class="panel panel-pad how">
-    <div class="panel-title" style="margin-bottom:10px">How public requests flow</div>
-    <ol>
-      <li><b>Submit</b><span>Agent fills the form. Turnstile and a hidden honeypot field block bots; the backend fails closed.</span></li>
-      <li><b>Match</b><span>The mobile number is matched to Employee_Directory and the current DID from Active_DIDs.</span></li>
-      <li><b>Merge</b><span>If the agent also called the request line, the form attaches to the same ticket (FORM_ATTACHED).</span></li>
-      <li><b>Queue</b><span>The ticket appears in Support Requests and the Replacement Queue for an operator.</span></li>
-      <li><b>Notify</b><span>Optional email/call notifications, per Settings.</span></li>
-    </ol>
-    <div class="note"><Icon name="info" size={14} />Repeat submissions within the same open ticket are recorded as REPEAT_PUBLIC_SUBMISSION, not as new tickets.</div>
-  </div>
 </div>
 
 <style>
-  .wrap { display: grid; grid-template-columns: 400px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .wrap { display: grid; grid-template-columns: minmax(0, 440px); gap: 16px; align-items: start; }
   .phone { border-radius: 36px; padding: 12px; background: linear-gradient(160deg, #2a303c, #141a26); box-shadow: var(--shadow-lg); }
   .screen { border-radius: 26px; background: linear-gradient(180deg, #fff6ef 0%, #fff 30%); padding: 18px; min-height: 560px; display: grid; align-content: start; gap: 14px; }
   .top { display: flex; gap: 10px; align-items: center; } .top div { display: grid; line-height: 1.2; } .top small { color: var(--muted); font-size: 11.5px; }
@@ -72,6 +61,5 @@
   .ok { display: grid; justify-items: center; text-align: center; gap: 8px; padding-top: 30px; }
   .okc { width: 60px; height: 60px; border-radius: 50%; background: var(--ok-50); color: var(--ok); display: grid; place-items: center; }
   .tk { font-size: 18px; background: var(--brand-50); padding: 6px 12px; border-radius: 10px; color: var(--brand-600); }
-  .how ol { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 10px; } .how li { display: grid; font-size: 12.5px; } .how li span { color: var(--muted); }
   @media (max-width: 900px) { .wrap { grid-template-columns: minmax(0, 1fr); } .phone { max-width: 400px; justify-self: center; width: 100%; } }
 </style>

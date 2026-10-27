@@ -34,21 +34,37 @@ export const avatarColor = (s = '') => AV[[...s].reduce((a, c) => a + c.charCode
 export const maskDid = (d = '') => (d.length > 6 ? d.slice(0, 4) + '••' + d.slice(-4) : d);
 export const statusLabel = (s = '') => s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
+// CSV with a UTF-8 BOM so Excel opens names correctly; formula-like cells are neutralised.
 export function downloadCsv(rows, filename) {
   if (!rows?.length) return;
   const cols = Object.keys(rows[0]);
   const esc = (v) => { const s = v === null || v === undefined ? '' : String(v); return /[",\n]/.test(s) || /^[=+\-@]/.test(s) ? `"${s.replace(/"/g, '""').replace(/^([=+\-@])/, "'$1")}"` : s; };
   const csv = [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n');
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = filename; a.click();
+  a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })); a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-// Notification_Logs rows → readable text. `details` may be plain text or JSON from MCube ({"callid","msg"}).
-const KIND = { call_queued: 'Call to agent · request queued', call_reminder: 'Reminder call', review: 'Review decision', completed: 'Completion call', email: 'Email', call: 'Call' };
+// Notification_Logs rows → readable text.
+// `details` may be plain text, MCube JSON ({"callid","msg"}), or "exenumber=<n>; {json}" for outbound calls.
+const KIND = { call_queued: 'Queue alert call', call_reminder: 'Reminder call', call_reminder_level2: 'Reminder call · Level 2', queued_level2: 'Queue alert call · Level 2', completed: 'Completion call to agent', review: 'Review decision', email: 'Email' };
+export const notifGroup = (n = {}) => { const k = String(n.kind || ''); return k === 'review' ? 'review' : k.includes('email') ? 'email' : 'call'; };
 export function notifText(n = {}) {
-  let detail = String(n.details ?? '');
-  try { const j = JSON.parse(detail); if (j && typeof j === 'object') detail = j.msg || j.message || (j.callid ? `call ${j.callid}` : ''); } catch { /* plain text */ }
+  const raw = String(n.details ?? '');
+  let msg = raw, exe = '';
+  const m = raw.match(/exenumber=(\d+)/); if (m) exe = m[1];
+  const j = raw.match(/\{.*\}/s);
+  if (j) { try { const o = JSON.parse(j[0]); msg = o.msg || o.message || ''; } catch { /* keep raw */ } }
+  else if (m) msg = raw.replace(/exenumber=\d+;?\s*/, '');
   const kind = KIND[n.kind] || statusLabel(String(n.kind || 'Notification'));
-  return { title: detail ? `${kind}: ${detail}` : kind, sub: `${n.target || '—'} · ${statusLabel(String(n.result || ''))}` };
+  const via = exe ? ` · via ${exe}` : '';
+  return { title: msg ? `${kind}: ${msg.trim()}` : kind, sub: `${n.target || '—'}${via} · ${statusLabel(String(n.result || ''))}`, kind, msg: msg.trim(), exe };
+}
+// result → badge tone. For a review, "rejected" is a decision, not an error.
+export function notifTone(n = {}) {
+  const r = String(n.result || '').toLowerCase();
+  if (['submitted', 'success', 'approved', 'sent'].includes(r)) return 'ok';
+  if (r === 'rejected') return notifGroup(n) === 'review' ? 'neutral' : 'bad';
+  if (r === 'uncertain' || r === 'skipped') return 'warn';
+  return 'neutral';
 }

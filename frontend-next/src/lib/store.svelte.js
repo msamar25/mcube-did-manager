@@ -1,10 +1,11 @@
 // Shared app data, loaded once through the data facade.
 import * as api from './data/source.js';
 import * as calc from './calc.js';
+import { TICKET_ZONES } from './support.js';
 
 export const db = $state({
   loaded: false, loading: false, error: '',
-  inventory: [], requests: [], logs: [], jobs: [], notifications: [], employees: [], insights: null, history: [], accessLog: [],
+  inventory: [], requests: [], logs: [], jobs: [], notifications: [], employees: [], insights: null, history: [], directory: null,
   lastSync: ''
 });
 
@@ -19,17 +20,17 @@ async function fetchAll({ withSlow = false } = {}) {
   const opOf = new Map(inv.items.map((i) => [String(i.did), i.operator]));
   out.requests = req.items.map((r) => (r.operator ? r : { ...r, operator: opOf.get(String(r.current_did)) || '' }));
   if (withSlow || !db.insights || Date.now() - slowAt > SLOW_EVERY * 1000) {
-    const [ins, acc] = await Promise.allSettled([api.getInsights(), api.getAccessLog()]);
+    const [ins, dir] = await Promise.allSettled([api.getInsights(), api.getEmployeeDirectory()]);
     if (ins.status === 'fulfilled') { out.insights = ins.value; slowAt = Date.now(); }
-    if (acc.status === 'fulfilled') out.accessLog = acc.value.items;
+    if (dir.status === 'fulfilled') out.directory = dir.value.items;
   }
   const insights = out.insights || db.insights;
   if (api.LIVE) {
-    out.employees = api.employeesFrom(out.inventory, insights);
+    out.employees = api.employeesFrom(out.inventory, insights, out.directory || db.directory);
     out.history = api.historyFrom(out.logs, out.inventory);
   } else if (!db.employees.length) {
     const [emp, hist] = await Promise.all([api.getEmployees(), api.getHistory()]);
-    out.employees = emp.items; out.history = hist.items;
+    out.employees = emp.items.map((e) => ({ ...e, status: String(e.status).toLowerCase() === 'inactive' ? 'deactivated' : 'active', inDirectory: true })); out.history = hist.items;
   }
   return out;
 }
@@ -44,9 +45,19 @@ export async function load() {
 
 // Clear everything on sign-out so the next person never sees the previous session's data.
 export function resetData() {
-  Object.assign(db, { loaded: false, loading: false, error: '', inventory: [], requests: [], logs: [], jobs: [], notifications: [], employees: [], insights: null, history: [], accessLog: [], lastSync: '' });
+  Object.assign(db, { loaded: false, loading: false, error: '', inventory: [], requests: [], logs: [], jobs: [], notifications: [], employees: [], insights: null, history: [], directory: null, lastSync: '' });
   slowAt = 0;
 }
+
+// ---- notifications: read state is per browser + user (the log itself is never changed) ----
+const seenKey = () => {
+  try { const b = (sessionStorage.getItem('did_token') || '').split('.')[0].replace(/-/g, '+').replace(/_/g, '/'); return 'next_notif_seen:' + (JSON.parse(atob(b + '='.repeat((4 - (b.length % 4)) % 4))).email || 'demo'); }
+  catch { return 'next_notif_seen:demo'; }
+};
+export const notes = $state({ seen: 0 });
+export function loadSeen() { try { notes.seen = Number(localStorage.getItem(seenKey()) || 0); } catch { notes.seen = 0; } }
+export function markAllRead() { notes.seen = Date.now(); try { localStorage.setItem(seenKey(), String(notes.seen)); } catch { /* private mode */ } }
+export function unreadCount() { return db.notifications.filter((n) => (calc.parseTs(n.timestamp_utc) || 0) > notes.seen).length; }
 
 // ---- automatic refresh ----
 // While the app is open and the tab is visible, data is re-read in the background every
@@ -79,7 +90,7 @@ function cached(src, key, fn) {
   return m.get(key);
 }
 export function opStats() { return cached(db.inventory, 'ops', () => calc.operatorStats(db.inventory)); }
-export function totals() { return cached(db.inventory, 'totals', () => ({ ...calc.totals(db.inventory), agents: db.employees.length })); }
+export function totals() { return cached(db.inventory, 'totals', () => ({ ...calc.totals(db.inventory), agents: db.employees.filter((e) => e.status === 'active').length })); }
 // Pool Activity 24h and the 7-day utilization trend are calculated from Change_Logs (see lib/calc.js).
 export function poolActivity() { return cached(db.logs, 'pool:' + db.inventory.length, () => calc.poolActivity24h(db.logs, db.inventory)); }
 export function since() { return cached(db.logs, 'since', () => calc.assignedSince(db.logs)); }
@@ -91,5 +102,8 @@ export function flowCounts() {
 }
 export function sceneData() {
   const t = totals();
-  return { operators: opStats(), total: t.total, pool: t.pool, agents: t.agents, flow: flowCounts() };
+  // ticket board columns, grouped exactly like the dashboard hub (lib/support.js)
+  const tickets = {}, columns = {};
+  for (const [k, z] of Object.entries(TICKET_ZONES)) { tickets[k] = db.requests.filter((r) => z.statuses.includes(r.status)); columns[k] = tickets[k].length; tickets[k] = tickets[k].slice(0, 5).map((r) => ({ ticket_no: r.ticket_no, agent_name: r.agent_name, agent_number: r.agent_number, first_call_utc: r.first_call_utc })); }
+  return { operators: opStats(), total: t.total, pool: t.pool, agents: t.agents, flow: flowCounts(), tickets, columns };
 }

@@ -1,6 +1,9 @@
 <script>
   import { db, opStats, totals, flowCounts, sceneData, poolActivity, trend } from '../lib/store.svelte.js';
   import { poolChart, trendChart } from '../lib/charts.js';
+  import { rangePool, rangeTrend } from '../lib/range.svelte.js';
+  import RangePicker from '../components/RangePicker.svelte';
+  import { TICKET_ZONES } from '../lib/support.js';
   import { go } from '../lib/router.svelte.js';
   import { agoShort, n, pct } from '../lib/format.js';
   import Icon from '../components/Icon.svelte';
@@ -21,7 +24,7 @@
   let ops = $derived(opStats());
   let t = $derived(totals());
   let flow = $derived(flowCounts());
-  const data = sceneData();
+  let data = $derived(sceneData());
   let view = $state('3d'), selected = $state(null), opFilter = $state('all'), statusFilter = $state('all'), teamFilter = $state('all'), q = $state(''), auto = $state(false), sceneRef = $state(), hint = $state(true), stageEl;
   onMount(() => { const off = () => (hint = false); const t = setTimeout(off, 7000); stageEl?.addEventListener('cc-interact', off); return () => { clearTimeout(t); stageEl?.removeEventListener('cc-interact', off); }; });
   // managers come from the employee directory (role5), so the filter matches real data
@@ -36,9 +39,10 @@
   }
   let selOp = $derived(selected?.type === 'operator' ? ops.find((o) => o.key === selected.key) : null);
   let recent = $derived(db.requests.filter((r) => (opFilter === 'all' || r.operator === opFilter) && (statusFilter === 'all' || r.status === statusFilter) && (teamFilter === 'all' || emp.get(r.agent_number)?.role5 === teamFilter)).slice(0, 4));
-  let results = $derived(q.trim().length < 2 ? [] : db.inventory.filter((i) => i.status === 'active' && (`${i.did} ${i.agent} ${i.agent_number}`.toLowerCase().includes(q.trim().toLowerCase()))).slice(0, 6));
-  let pc = $derived(poolChart(poolActivity()));
-  let tc = $derived(trendChart(ops, trend()));
+  let results = $derived(q.trim().length < 2 ? [] : db.inventory.filter((i) => i.status === 'active' && String(qIn === 'did' ? i.did : qIn === 'name' ? i.agent : qIn === 'number' ? i.agent_number : `${i.did} ${i.agent} ${i.agent_number}`).toLowerCase().includes(q.trim().toLowerCase())).slice(0, 6));
+  let qIn = $state('all');
+  let pc = $derived(poolChart(rangePool()));
+  let tc = $derived(trendChart(ops, rangeTrend()));
   let selRequests = $derived(selOp ? db.requests.filter((r) => r.operator === selOp.key) : []);
 </script>
 
@@ -59,6 +63,7 @@
           <div class="res">{#each results as r}<button onclick={() => go('command', 'agent', { n: r.agent_number })}><Person name={r.agent} sub={r.did} size={24} /><OpChip name={r.operator} /></button>{/each}</div>
         {/if}
       </div>
+      <select class="select qin" bind:value={qIn} aria-label="Search in"><option value="all">Agent or DID</option><option value="did">DID</option><option value="name">Agent name</option><option value="number">Agent number</option></select>
     </div>
   </div>
 
@@ -97,7 +102,7 @@
           <div class="dg"><div><small>Directory</small><b>{n(t.agents)}</b></div><div><small>With active DID</small><b>{n(t.active)}</b></div></div>
           <button class="btn btn-sm" onclick={() => go('command', 'agent')}>Open Agent 360°</button>
         {:else if selected.type === 'flow'}
-          <div class="dg">{#each ['pending', 'processing', 'completed', 'failed'] as s}<div><small>{s}</small><b>{n(flow[s])}</b></div>{/each}</div>
+          <div class="dg">{#each Object.entries(TICKET_ZONES) as [k, z]}<div class:hl={selected.key === k}><small>{z.label}</small><b>{n(data.columns?.[k])}</b></div>{/each}</div>
           <button class="btn btn-sm" onclick={() => go('command', 'replacement')}>Open Replacement Queue</button>
         {:else}
           <div class="dg"><div><small>Total DIDs</small><b>{n(t.total)}</b></div><div><small>Operators</small><b>{ops.length}</b></div></div>
@@ -139,8 +144,9 @@
       {:else}<div class="empty">No requests match these filters.</div>{/each}
     </div>
     <div class="panel panel-pad">
-      <div class="panel-head"><span class="panel-title">Pool Activity · 24h</span><span class="legend">Pool now <b>{n(pc.poolNow)}</b></span></div>
-      <Bars labels={pc.labels} values={pc.series[0].values} height={112} label="Verified replacements from the pool, last 24 hours" unit=" assigned" />
+      <div class="panel-head"><span class="panel-title">Pool Activity</span><span class="legend">Pool now <b>{n(pc.poolNow)}</b></span></div>
+      <RangePicker />
+      <Bars labels={pc.labels} values={pc.series[0].values} height={112} label="Verified replacements from the pool" unit=" assigned" />
       <p class="cnote">{pc.note}</p>
     </div>
     <div class="panel panel-pad">
@@ -152,6 +158,8 @@
 </div>
 
 <style>
+  .dg .hl { outline: 2px solid var(--brand); outline-offset: -2px; }
+  .qin { width: auto; }
   .cnote { margin: 4px 0 0; font-size: 10.5px; color: var(--faint); line-height: 1.35; } .legend b { color: var(--ink); }
   .cc { display: grid; grid-template-columns: minmax(0, 1fr) 292px; grid-template-rows: auto minmax(460px, 1fr) auto; gap: 12px; min-height: 100%; padding: 12px; }
   .toolbar { grid-column: 1; display: flex; gap: 10px; align-items: center; padding: 7px; border-radius: 14px; flex-wrap: wrap; position: relative; z-index: 20; }
@@ -194,7 +202,8 @@
   .bottom .panel-head { margin-bottom: 6px; flex-wrap: wrap; row-gap: 2px; }
   .bottom .panel-title { white-space: nowrap; }
   .lnk { font-size: 12px; font-weight: 600; color: var(--brand-600); }
-  .rr { display: grid; grid-template-columns: minmax(0, 1fr) 76px 84px 58px; gap: 8px; align-items: center; padding: 5px 0; font-size: 12px; border-bottom: 1px solid var(--line-2); }
+  .rr :global(.op-chip) { display: none; } /* narrow card: the agent name needs the room */
+  .rr { display: grid; grid-template-columns: minmax(0, 1fr) 84px 58px; gap: 8px; align-items: center; padding: 5px 0; font-size: 12px; border-bottom: 1px solid var(--line-2); }
   .rr:last-child { border-bottom: 0; }
   .when { text-align: right; font-size: 11px; }
   .legend { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); flex-wrap: wrap; justify-content: flex-end; }

@@ -22,7 +22,7 @@ export const NAV = [
   { id: 'reports', label: 'Reports', icon: 'file', pages: [
     { id: 'audit', label: 'Audit Log', icon: 'log' },
     { id: 'history', label: 'Replacement History', icon: 'history' },
-    { id: 'exports', label: 'Exports', icon: 'download' }
+    { id: 'exports', label: 'Custom Reports', icon: 'filedown' }
   ] },
   { id: 'settings', label: 'Settings', icon: 'settings', admin: true, pages: [
     { id: 'intake', label: 'Request Intake', icon: 'inbox' },
@@ -35,13 +35,30 @@ export const NAV = [
   ] }
 ];
 
+// User Management app (platform administration)
+export const ADMIN_NAV = [
+  { id: 'admin', label: 'User Management', icon: 'users', pages: [
+    { id: 'users', label: 'Users & Access', icon: 'users' },
+    { id: 'apps', label: 'App Settings', icon: 'grid' },
+    { id: 'global', label: 'Global Settings', icon: 'sliders' },
+    { id: 'audit', label: 'Audit Log', icon: 'log' }
+  ] }
+];
+// Which app a route belongs to: home = App Launcher, users = User Management, did = DID Replacement.
+export const NAV_OF = { did: NAV, users: ADMIN_NAV };
+export const hadHash = typeof location !== 'undefined' && location.hash.length > 2;
+
 function parse() {
-  const h = (location.hash || '#/dashboard/overview').slice(2);
+  const h = (location.hash || '#/home').slice(2);
   const [path, qs = ''] = h.split('?');
-  const [section = 'dashboard', page] = path.split('/');
-  const sec = NAV.find((s) => s.id === section) || NAV[0];
+  const [section = 'home', page] = path.split('/');
+  const params = Object.fromEntries(new URLSearchParams(qs));
+  if (section === 'home') return { app: 'home', section: 'home', page: 'apps', params };
+  const isAdmin = section === 'admin';
+  const nav = isAdmin ? ADMIN_NAV : NAV;
+  const sec = nav.find((s) => s.id === section) || nav[0];
   const pg = sec.pages.find((p) => p.id === page) || sec.pages[0];
-  return { section: sec.id, page: pg.id, params: Object.fromEntries(new URLSearchParams(qs)) };
+  return { app: isAdmin ? 'users' : 'did', section: sec.id, page: pg.id, params };
 }
 
 export const route = $state(parse());

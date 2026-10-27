@@ -1,6 +1,8 @@
 <script>
   import { db, opStats, totals, flowCounts, poolActivity } from '../lib/store.svelte.js';
   import { poolChart } from '../lib/charts.js';
+  import { rangePool } from '../lib/range.svelte.js';
+  import RangePicker from '../components/RangePicker.svelte';
   import { parseTs, replacementsSince } from '../lib/calc.js';
   import { session } from '../lib/session.svelte.js';
   import { computeAlerts } from '../lib/risk.js';
@@ -32,7 +34,7 @@
   const today = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long' }).format(new Date());
   let last24 = $derived(db.requests.filter((r) => Date.now() - parseTs(r.first_call_utc) < 864e5).length);
   let doneToday = $derived(replacementsSince(db.logs, 24).length);
-  let pc = $derived(poolChart(poolActivity()));
+  let pc = $derived(poolChart(rangePool()));
   let byDay = $derived((db.insights?.by_day || []).slice(-14).map((d) => d.requests));
   const stages = [
     { k: 'pending', label: 'Pending', c: 'var(--warn)' }, { k: 'processing', label: 'Processing', c: 'var(--info)' },
@@ -111,7 +113,6 @@
       {#each stages as s}
         <div class="st"><span class="sl">{s.label}</span><div class="sb"><Meter value={flow[s.k]} max={flowMax} color={s.c} height={8} /></div><b class="tnum">{n(flow[s.k])}</b></div>
       {/each}
-      <div class="note"><Icon name="shieldok" size={14} />One agent at a time: fresh inventory → deactivate → activate → verify.</div>
     </div>
 
     <div class="panel panel-pad recent">
@@ -129,9 +130,10 @@
     </div>
 
     <div class="panel panel-pad">
-      <div class="panel-head"><span class="panel-title"><span class="ico"><Icon name="pool" size={14} /></span>Pool Activity · 24h</span>
+      <div class="panel-head"><span class="panel-title"><span class="ico"><Icon name="pool" size={14} /></span>Pool Activity</span>
         <span class="legend">Pool now <b>{n(pc.poolNow)}</b></span></div>
-      <Bars labels={pc.labels} values={pc.series[0].values} height={140} label="Verified replacements from the pool, last 24 hours" unit=" assigned" />
+      <RangePicker />
+      <Bars labels={pc.labels} values={pc.series[0].values} height={140} label="Verified replacements from the pool" unit=" assigned" />
       <p class="cnote">{pc.note}</p>
     </div>
 
@@ -207,7 +209,7 @@
 
   @media (max-width: 1360px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 1100px) { .kpis { bottom: 54px; max-width: calc(100% - 24px); } }
-  @media (max-width: 900px) { .rr { grid-template-columns: minmax(0, 1fr) 92px 72px; } .rr :global(.op-chip) { display: none; } }
+  @media (max-width: 1600px) { .rr { grid-template-columns: minmax(0, 1fr) 92px 72px; } .rr :global(.op-chip) { display: none; } }
   @media (max-width: 760px) {
     .dash { grid-template-rows: auto; min-height: 0; }
     .cards { grid-template-columns: minmax(0, 1fr); }

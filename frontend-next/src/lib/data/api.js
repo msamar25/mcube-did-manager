@@ -24,12 +24,12 @@ function messageOf(status, body) {
   return `Request failed (HTTP ${status})`;
 }
 
-export async function api(path, { method = 'GET', body, timeout = 45000, auth = true } = {}) {
+export async function api(path, { method = 'GET', body, timeout = 45000, auth = true, token: explicit } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   const headers = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  const token = auth ? getToken() : '';
+  const token = explicit || (auth ? getToken() : '');
   if (token) headers.Authorization = `Bearer ${token}`;
   let res;
   try {
@@ -39,7 +39,7 @@ export async function api(path, { method = 'GET', body, timeout = 45000, auth = 
   } finally { clearTimeout(timer); }
   let data = null;
   try { data = await res.json(); } catch { /* empty or non-JSON body */ }
-  if (res.status === 401 && auth && token) { setToken(''); onUnauthorized(messageOf(401, data)); }
+  if (res.status === 401 && auth && token && !explicit) { setToken(''); onUnauthorized(messageOf(401, data)); }
   if (!res.ok) throw new ApiError(res.status, messageOf(res.status, data), data?.detail);
   return data;
 }

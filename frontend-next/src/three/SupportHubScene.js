@@ -52,12 +52,13 @@ const ALL_ZONES = [
 // Ticket-only layout (admissions hidden): a clockwise ring around the hub.
 const TICKET_RING = { incoming: [-17, -10], progress: [17, -10], resolved: [17, 10], failed: [-17, 10] };
 export const ZONES = ADMISSIONS_ENABLED ? ALL_ZONES : ALL_ZONES.filter((z) => z.group === 'tickets').map((z) => ({ ...z, pos: TICKET_RING[z.key] }));
-const ENTRY = new THREE.Vector3(-31, 3.4, -10); // where new tickets come from when admissions are hidden
+const ENTRY = new THREE.Vector3(-26, 3.4, -10); // where new tickets come from when admissions are hidden
 
 
 export class SupportHubScene {
   constructor(el, opts = {}) {
-    this.el = el; this.data = opts.data || {}; this.onSelect = opts.onSelect || (() => {}); this.onStep = opts.onStep || (() => {});
+    // showcase: login backdrop (no counts, gentle auto-orbit, no zoom)
+    this.el = el; this.data = opts.data || {}; this.showcase = !!opts.showcase; this.onSelect = opts.onSelect || (() => {}); this.onStep = opts.onStep || (() => {});
     this.reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const lowPower = (navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 4;
     this.quality = opts.quality === 'low' || (opts.quality !== 'high' && lowPower) ? 'low' : 'high';
@@ -82,6 +83,7 @@ export class SupportHubScene {
     const controls = this.controls = new OrbitControls(this.camera, r.domElement);
     Object.assign(controls, { enableDamping: true, dampingFactor: 0.07, minDistance: 24, maxDistance: 110, maxPolarAngle: 1.2, minPolarAngle: 0.25, enablePan: false, rotateSpeed: 0.5, zoomSpeed: 0.8 });
     if (matchMedia('(pointer: coarse)').matches) { controls.touches = { ONE: null, TWO: THREE.TOUCH.DOLLY_ROTATE }; r.domElement.style.touchAction = 'pan-y'; }
+    if (this.showcase) Object.assign(controls, { enableZoom: false, autoRotate: !this.reduced, autoRotateSpeed: 0.35 });
     controls.addEventListener('start', () => { this.tween = null; this._user = true; });
 
     // No bloom pass: it tone-maps the glowing pathways into pastel on a light floor. Halo sprites give the glow.
@@ -345,7 +347,7 @@ export class SupportHubScene {
     const pulseM = new THREE.MeshBasicMaterial({ color: new THREE.Color(z.color).multiplyScalar(2.2), transparent: true, opacity: 0, toneMapped: false, depthWrite: false });
     const pulse = new THREE.Mesh(new THREE.RingGeometry(3.5, 3.8, 80), pulseM); pulse.rotation.x = -Math.PI / 2; pulse.position.y = PH + 0.05; g.add(pulse); this.noReflect.push(pulse);
     this._hitBox(f, PW, 4, PD, { type: 'zone', key: z.key });
-    const label = this.labels.add(g, [0, PH + 3.4, 0], `<span class="ic" style="--c:${z.color}">${svgIcon(z.icon)}</span><span><b>${z.label}</b><em data-k="${z.key}">${this._count(z.key)}</em></span>`, { cls: 'sh-pill ' + z.group + ' ' + z.key, priority: 10 + ZONES.indexOf(z), anchor: [0.5, 1], nudge: true, pad: 7, onClick: () => this.onSelect({ type: 'zone', key: z.key }) });
+    const label = this.labels.add(g, [0, PH + 3.4, 0], `<span class="ic" style="--c:${z.color}">${svgIcon(z.icon)}</span><span><b>${z.label}</b>${this.showcase ? '' : `<em data-k="${z.key}">${this._count(z.key)}</em>`}</span>`, { cls: 'sh-pill ' + z.group + ' ' + z.key, priority: 10 + ZONES.indexOf(z), anchor: [0.5, 1], nudge: true, pad: 7, onClick: () => this.onSelect({ type: 'zone', key: z.key }) });
     const fx = Math.sin(yaw), fz = Math.cos(yaw);
     this.zones.set(z.key, { ...z, g, yaw, pulseM, pulse, label, front: new THREE.Vector3(x + fx * (PD / 2 + 0.3), 0.06, zz + fz * (PD / 2 + 0.3)), top: new THREE.Vector3(x, PH + 2.6, zz), monMats: ws.userData.monMats || [] });
   }

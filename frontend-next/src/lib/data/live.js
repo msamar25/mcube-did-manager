@@ -23,6 +23,9 @@ export async function getInventory() {
 const newest = (a, b) => (parseTs(b.first_call_utc) || 0) - (parseTs(a.first_call_utc) || 0);
 export async function getRequests() { const r = await api('/api/requests'); return { items: (r.items || []).map(normReq).sort(newest) }; }
 export async function getLogs() { const r = await api('/api/logs'); return { items: (r.items || []).map(normLog).reverse() }; } // newest first, like the screens expect
+// Every Change_Logs row of the last `days` days (for trends / reports over a chosen range).
+export async function getLogsSince(days) { const r = await api(`/api/logs?days=${days}`, { timeout: 60000 }); return { items: (r.items || []).map(normLog).reverse(), full: !r.truncated }; }
+export async function getEmployeeDirectory() { const r = await api('/api/employees'); return { items: (r.items || []).map((e) => ({ ...e, agent_number: idStr(e.agent_number) })) }; }
 export async function getSyncStatus() {
   const [jobs, inv] = await Promise.all([api('/api/jobs/status'), api('/api/inventory/status').catch(() => null)]);
   const list = Object.entries(jobs.jobs || {}).map(([job, row]) => ({ job, label: JOB_LABELS[job] || job, ...row }));
@@ -35,15 +38,22 @@ export async function getInsights() {
   r.agents = (r.agents || []).map((a) => ({ ...a, agent_number: idStr(a.agent_number) }));
   return r;
 }
-// No employee-list endpoint: agents are the people holding a DID today (names from MCube), with
-// team lead / manager from the insights report when known. Full directory details come per agent from /api/agents/{n}/profile.
-export function employeesFrom(inventory, insights) {
+// Agents = Employee_Directory (MCube employee sync) + anyone holding a DID today.
+// status: 'active' (in the directory, MCube status active), 'deactivated' (MCube status not active),
+//         'missing' (holds a DID or has history but is no longer in the MCube directory).
+export const empStatus = (v) => { const s = String(v ?? '').trim().toLowerCase(); return ['0', 'inactive', 'deactivated', 'disabled', 'false', 'no', 'deleted'].includes(s) ? 'deactivated' : 'active'; };
+export function employeesFrom(inventory, insights, directory = null) {
   const team = new Map((insights?.agents || []).map((a) => [a.agent_number, a]));
+  const holds = new Set(inventory.filter((i) => i.status === 'active' && i.agent_number && String(i.agent || '').trim().toLowerCase() !== 'common pool').map((i) => i.agent_number));
   const out = new Map();
+  for (const e of directory || []) {
+    if (!e.agent_number || out.has(e.agent_number)) continue;
+    out.set(e.agent_number, { agent_number: e.agent_number, agent_name: e.agent_name || '', email: e.email || '', role4: e.role4 || '', role5: e.role5 || '', role: e.role || '', status: empStatus(e.status), inDirectory: true, hasDid: holds.has(e.agent_number) });
+  }
   for (const i of inventory) {
-    if (i.status !== 'active' || !i.agent_number || String(i.agent || '').trim().toLowerCase() === 'common pool' || out.has(i.agent_number)) continue;
+    if (!holds.has(i.agent_number) || out.has(i.agent_number)) continue;
     const t = team.get(i.agent_number) || {};
-    out.set(i.agent_number, { agent_number: i.agent_number, agent_name: i.agent || t.agent_name || '', role4: t.team_lead || '', role5: t.manager || '', status: 'Active' });
+    out.set(i.agent_number, { agent_number: i.agent_number, agent_name: i.agent || t.agent_name || '', email: '', role4: t.team_lead || '', role5: t.manager || '', status: directory ? 'missing' : 'active', inDirectory: false, hasDid: true });
   }
   return [...out.values()];
 }

@@ -1,6 +1,8 @@
 <script>
   import { db, opStats, trend } from '../lib/store.svelte.js';
   import { trendChart } from '../lib/charts.js';
+  import { rangeTrend } from '../lib/range.svelte.js';
+  import RangePicker from '../components/RangePicker.svelte';
   import { isReplacement, isOpen } from '../lib/calc.js';
   import { route, go } from '../lib/router.svelte.js';
   import { n, pct, downloadCsv } from '../lib/format.js';
@@ -20,12 +22,12 @@
   const openReq = (k) => db.requests.filter((r) => r.operator === k && isOpen(r)).length;
   let rows = $derived(ops.map((o) => ({ ...o, replacements: replacements(o.key), open: openReq(o.key), share: (o.total / ops.reduce((s, x) => s + x.total, 0)) * 100 })));
   let shown = $derived(focus === 'all' ? rows : rows.filter((r) => r.key === focus));
-  let tr = $derived(trend());
+  let tr = $derived(rangeTrend());
   let tc = $derived(trendChart(shown, tr));
   let totalAll = $derived(rows.reduce((s, r) => s + r.total, 0));
 </script>
 
-<PageHead title="Operator Analytics" sub="Allocation, utilization and inventory per telecom operator" eyebrow="Command Center">
+<PageHead title="Operator Analytics" eyebrow="Command Center">
   {#snippet actions()}
     <select class="select" bind:value={focus} aria-label="Operator"><option value="all">All operators</option>{#each ops as o}<option value={o.key}>{o.key}</option>{/each}</select>
     <button class="btn" onclick={() => downloadCsv(rows.map(({ key, label, total, active, pool, inactive, utilization, duplicates, replacements, open }) => ({ operator: key, label, total, active, pool, inactive, utilization, duplicates, replacements, open_requests: open })), 'operator-analytics.csv')}><Icon name="download" size={14} />Export</button>
@@ -41,7 +43,7 @@
       <div class="og">
         <div><small>Active</small><b>{n(o.active)}</b></div><div><small>Pool</small><b>{n(o.pool)}</b></div><div><small>Inactive</small><b>{n(o.inactive)}</b></div><div><small>Open req.</small><b>{n(o.open)}</b></div>
       </div>
-      <div class="os"><small class="muted">7-day utilization</small><Spark values={tr.items.map((d) => d[o.key] ?? 0)} color={o.color} width={110} height={26} /></div>
+      <div class="os"><small class="muted">Utilization trend</small><Spark values={tr.items.map((d) => d[o.key] ?? 0)} color={o.color} width={110} height={26} /></div>
     </button>
   {/each}
 </div>
@@ -59,7 +61,8 @@
     </table></div>
   </div>
   <div class="panel panel-pad">
-    <div class="panel-head wrap"><span class="panel-title">Utilization trend · 7 days</span><span class="legend">{#each shown as o}<i style="background:{o.color}"></i>{o.key}{/each}</span></div>
+    <div class="panel-head wrap"><span class="panel-title">Utilization trend</span><span class="legend">{#each shown as o}<i style="background:{o.color}"></i>{o.key}{/each}</span></div>
+    <RangePicker />
     <LineChart labels={tc.labels} height={190} yMin={tc.yMin} yMax={tc.yMax} ySuffix="%" label="Operator utilization trend" series={tc.series} />
     <p class="cnote">{tc.note}</p>
     <div class="panel-head" style="margin-top:10px"><span class="panel-title">Verified replacements by operator</span><a class="lnk" href="#/reports/history">History →</a></div>

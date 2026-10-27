@@ -10,7 +10,7 @@ cd frontend-next && npm run dev:live           # UI against it
 ```
 
 **Sign-in:**
-- Logins: `admin@dev.local` / PIN `2468`, `operator@dev.local` / PIN `1357`.
+- Logins: `admin@dev.local` / PIN `2468` (super admin), `operator@dev.local` / PIN `1357`, `lead@dev.local` / PIN `8642` (added in User Management).
 - The one-time code is printed in the console and written to `tools/dev-harness/.last_otp` (git-ignored).
 
 **What is real and what is fake:**

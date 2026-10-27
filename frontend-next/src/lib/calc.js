@@ -72,12 +72,73 @@ export function operatorStats(items = []) {
   }).sort((a, b) => b.total - a.total || a.key.localeCompare(b.key));
 }
 
-// How much of a time window the loaded logs actually cover. /api/logs returns the last 500 rows only.
-export function logCoverage(logs = [], since) {
+// How much of a time window the loaded logs actually cover. /api/logs returns the last 500 rows only
+// unless ?days=N was used (then `full` = every row of that window was returned).
+export function logCoverage(logs = [], since, full = false) {
   let oldest = Infinity;
   for (const e of logs) { const t = parseTs(e.time_utc); if (t < oldest) oldest = t; }
-  const capped = logs.length >= 500;
+  const capped = !full && logs.length >= 500;
   return { rows: logs.length, oldest: Number.isFinite(oldest) ? oldest : null, complete: !capped || oldest <= since };
+}
+
+// ---- date ranges for trends: 24 hours, 7 / 15 / 30 days, or custom IST dates (inclusive) ----
+const istMidnight = (ms) => Math.floor((ms + IST_OFFSET_MIN * 60e3) / DAY) * DAY - IST_OFFSET_MIN * 60e3;
+const istDate = (ms) => new Date(ms + IST_OFFSET_MIN * 60e3).toISOString().slice(0, 10);
+const fromIstDate = (d) => Date.parse(d + 'T00:00:00Z') - IST_OFFSET_MIN * 60e3;
+export function rangeBounds({ preset = '7d', from = '', to = '' } = {}, now = Date.now()) {
+  if (preset === '24h') { const end = Math.ceil(now / HOUR) * HOUR; return { start: end - 24 * HOUR, end, hourly: true, days: 1, label: 'last 24 hours' }; }
+  if (preset === 'custom' && from) {
+    let a = fromIstDate(from), b = to ? fromIstDate(to) + DAY : istMidnight(now) + DAY;
+    if (b < a) [a, b] = [b - DAY, a + DAY];
+    b = Math.min(b, istMidnight(now) + DAY);
+    const days = Math.max(1, Math.round((b - a) / DAY));
+    return { start: a, end: b, hourly: days <= 1, days, label: `${from} → ${to || istDate(now)}` };
+  }
+  const days = { '15d': 15, '30d': 30 }[preset] || 7;
+  const end = istMidnight(now) + DAY;
+  return { start: end - days * DAY, end, hourly: false, days, label: `last ${days} days` };
+}
+// Days of history needed (from now back to range start) to compute a range.
+export const daysNeeded = (b, now = Date.now()) => Math.ceil((now - b.start) / DAY) + 1;
+
+// Pool activity over a range: verified replacements per hour (24h) or per IST day.
+//   assigned   EXACT, from Change_Logs.   poolLevel   ESTIMATE (pool walked back through replacements).
+export function poolActivity(logs = [], items = [], b = rangeBounds({ preset: '24h' }), full = false) {
+  const step = b.hourly ? HOUR : DAY;
+  const n = Math.max(1, Math.round((b.end - b.start) / step));
+  const buckets = Array.from({ length: n }, (_, i) => ({ t: b.start + i * step, hour: new Date(b.start + i * step).getHours(), date: istDate(b.start + i * step), assigned: 0, poolLevel: 0 }));
+  let after = 0; // replacements after the range end (to walk the pool back to it)
+  for (const e of logs) {
+    if (!isReplacement(e)) continue;
+    const t = parseTs(e.time_utc);
+    if (t >= b.end) after++;
+    else if (t >= b.start) buckets[Math.min(n - 1, Math.floor((t - b.start) / step))].assigned++;
+  }
+  let level = totals(items).pool + after;
+  for (let i = n - 1; i >= 0; i--) { buckets[i].poolLevel = level; level += buckets[i].assigned; }
+  const total = buckets.reduce((s, x) => s + x.assigned, 0);
+  return { items: buckets, hourly: b.hourly, coverage: logCoverage(logs, b.start, full), assigned: total, assigned24: total, label: b.label };
+}
+
+// Utilization per operator at the end of each IST day in the range (ESTIMATE, see utilizationTrend7d).
+export function utilizationTrend(logs = [], items = [], b = rangeBounds({ preset: '7d' }), full = false, now = Date.now()) {
+  const opOf = new Map(items.map((r) => [String(r.did), r.operator || 'Unknown']));
+  const cur = new Map(operatorStats(items).map((o) => [o.key, { a: o.assigned, p: o.pool }]));
+  const ev = logs.filter(isReplacement).map((e) => ({ t: parseTs(e.time_utc), n: opOf.get(String(e.new_did)), o: opOf.get(String(e.old_did)) })).filter((e) => !Number.isNaN(e.t)).sort((x, y) => y.t - x.t);
+  const undo = (e) => { if (e.n && cur.has(e.n)) { const v = cur.get(e.n); v.a = Math.max(0, v.a - 1); v.p++; } if (e.o && cur.has(e.o)) cur.get(e.o).a++; };
+  const lastEnd = Math.min(b.end, istMidnight(now) + DAY);
+  const ndays = Math.max(1, Math.round((lastEnd - b.start) / DAY));
+  const days = [];
+  let k = 0;
+  for (let d = 0; d < ndays; d++) {
+    const dayEnd = lastEnd - d * DAY;
+    for (; k < ev.length && ev[k].t >= dayEnd; k++) undo(ev[k]);
+    const row = { date: istDate(dayEnd - DAY), replacements: 0 };
+    for (const [key, v] of cur) row[key] = pct(v.a, v.p);
+    days.unshift(row);
+  }
+  for (const e of ev) { const row = days.find((r) => r.date === istDate(e.t)); if (row) row.replacements++; }
+  return { items: days, coverage: logCoverage(logs, b.start, full), label: b.label };
 }
 
 // Pool activity for the last 24 hours, hourly.
@@ -94,7 +155,8 @@ export function poolActivity24h(logs = [], items = [], now = Date.now()) {
   }
   let level = totals(items).pool;
   for (let i = 23; i >= 0; i--) { buckets[i].poolLevel = level; level += buckets[i].assigned; }
-  return { items: buckets, coverage: logCoverage(logs, start), assigned24: buckets.reduce((s, b) => s + b.assigned, 0) };
+  const assigned24 = buckets.reduce((s, b) => s + b.assigned, 0);
+  return { items: buckets, coverage: logCoverage(logs, start), assigned24, assigned: assigned24 };
 }
 
 // Utilization per operator at the end of each of the last 7 days (IST days).
@@ -158,4 +220,12 @@ export const isOpen = (r) => OPEN_STATUSES.includes(r.status);
 // Verified replacements within the last `hours`.
 export function replacementsSince(logs = [], hours = 24, now = Date.now()) {
   return logs.filter((e) => isReplacement(e) && now - parseTs(e.time_utc) < hours * 36e5);
+}
+
+// Count rows per hour (24 h range) or IST day inside a range, with empty buckets filled in.
+export function perBucket(rows = [], ts, b) {
+  const step = b.hourly ? HOUR : DAY, n = Math.max(1, Math.round((b.end - b.start) / step));
+  const out = Array.from({ length: n }, (_, i) => ({ t: b.start + i * step, date: istDate(b.start + i * step), hour: new Date(b.start + i * step).getHours(), count: 0 }));
+  for (const r of rows) { const t = parseTs(ts(r)); if (t >= b.start && t < b.end) out[Math.min(n - 1, Math.floor((t - b.start) / step))].count++; }
+  return out;
 }

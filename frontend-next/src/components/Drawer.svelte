@@ -1,15 +1,18 @@
 <script>
   import Icon from './Icon.svelte';
+  import { portal } from '../lib/portal.js';
   let { open = false, title = '', sub = '', width = 520, onclose = () => {}, children, actions } = $props();
   function key(e) { if (e.key === 'Escape' && open) onclose(); }
 </script>
 <svelte:window onkeydown={key} />
 {#if open}
+  <div class="dwrap" use:portal>
   <div class="scrim" onclick={onclose} role="presentation"></div>
   <aside class="drawer" style="--w:{width}px" role="dialog" aria-modal="true" aria-label={title}>
     <header><div><h3>{title}</h3>{#if sub}<p class="muted">{sub}</p>{/if}</div><div class="row">{@render actions?.()}<button class="btn btn-icon btn-ghost" onclick={onclose} aria-label="Close"><Icon name="x" /></button></div></header>
     <div class="content scroll-y">{@render children?.()}</div>
   </aside>
+  </div>
 {/if}
 <style>
   .scrim { position: fixed; inset: 0; background: rgba(20,26,38,.28); backdrop-filter: blur(2px); z-index: 80; animation: f .2s; }

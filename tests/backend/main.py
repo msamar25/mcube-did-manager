@@ -1,22 +1,18 @@
 """MCube DID replacement: sequential, fail-closed, Sheets-journaled operations."""
-import asyncio, json, logging, os, uuid, time, hmac, hashlib, secrets, base64, threading, random, re
+import asyncio, json, logging, os, uuid, time, hmac, hashlib, secrets, base64, threading, random
 from datetime import datetime, timezone, timedelta
 IST = timezone(timedelta(hours=5, minutes=30))
 from pathlib import Path
 from typing import Literal
 import httpx
 from fastapi import FastAPI, Depends, Header, HTTPException, Request
-from .workflows import Workflows, EMP_HEADERS, REQUEST_HEADERS, CALL_HEADERS, TICKET_EVENT_HEADERS, SettingsUpdate, QueueBatch, Review
-from fastapi.responses import FileResponse, JSONResponse
+from .workflows import Workflows, SettingsUpdate, QueueBatch, Review
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 log = logging.getLogger('mcube')
 app = FastAPI(title='UNext SupportHub', docs_url=None if os.getenv('APP_ENV') == 'production' else '/docs')
-from fastapi.middleware.cors import CORSMiddleware
-STATIC_ORIGINS=[x.strip().rstrip('/') for x in os.getenv('STATIC_FRONTEND_ORIGINS','').split(',') if x.strip()]
-if STATIC_ORIGINS:
-    app.add_middleware(CORSMiddleware,allow_origins=STATIC_ORIGINS,allow_credentials=False,allow_methods=['GET','POST','PUT','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 BASE = Path(__file__).resolve().parent.parent / 'frontend' / 'dist'
 MCUBE = os.getenv('MCUBE_BASE_URL', 'https://api.mcube.com/Restmcube-api').rstrip('/')
 from .operation_lock import OperationLock
@@ -67,15 +63,25 @@ class LoginVerify(BaseModel):
 @app.post('/api/auth/start')
 async def login_start(payload: LoginStart):
     email=payload.email.strip().lower()
-    # v88: identities come from the platform layer (environment users + User Management).
-    # With empty Platform_* tabs this is exactly the previous environment-variable behaviour.
-    lookup=await asyncio.to_thread(platform.login_lookup,email)
-    role,user_hash,pin_role=lookup if lookup else (None,None,None)
+    roles={os.getenv('ADMIN_EMAIL','').strip().lower():'admin',os.getenv('OPERATOR_EMAIL','').strip().lower():'operator'}
+    roles.pop('',None)
+    role=roles.get(email)
+    user_hash=None
+    # Additional operators have distinct identities and PINs. Never share operator credentials.
+    if not role:
+        try:
+            operator_users=json.loads(os.getenv('OPERATOR_USERS_JSON','[]'))
+            if not isinstance(operator_users,list): raise ValueError()
+            for entry in operator_users:
+                if str(entry.get('email','')).strip().lower()==email:
+                    role='operator';user_hash=str(entry.get('pin_hash',''));break
+        except (ValueError,TypeError,AttributeError):
+            raise HTTPException(503,'Invalid OPERATOR_USERS_JSON configuration')
     # Throttle attempts before validating the PIN to limit guessing.
     now=time.time(); recent=[t for t in OTP_RATE.get(email,[]) if now-t<900]
     if len(recent)>=5:raise HTTPException(429,'Too many attempts; try later')
     recent.append(now);OTP_RATE[email]=recent
-    if not role or not _pin_ok(payload.pin,pin_role,user_hash):raise HTTPException(401,'Invalid login details')
+    if not role or not _pin_ok(payload.pin,role,user_hash):raise HTTPException(401,'Invalid login details')
     if not os.getenv('SESSION_SECRET') or len(os.environ['SESSION_SECRET'])<32:
         raise HTTPException(503,'SESSION_SECRET must be configured')
     challenge=secrets.token_urlsafe(24);otp=f'{secrets.randbelow(1000000):06d}'
@@ -102,19 +108,12 @@ async def login_verify(payload: LoginVerify):
     if not hmac.compare_digest(actual,record['digest']):raise HTTPException(401,'Invalid OTP')
     OTP_CHALLENGES.pop(payload.challenge_id,None)
     await asyncio.to_thread(_safe_access_log, record['email'], record['role'], 'LOGIN_SUCCESS', '/api/auth/verify', 'SUCCESS')
-    hours=await asyncio.to_thread(platform.session_hours)
-    return {'token':_sign({'kind':'session','role':record['role'],'email':record['email'],'exp':int(time.time()+hours*3600)}),'role':record['role'],'expires_in':hours*3600}
-
-async def identity(authorization: str | None = Header(None)):
-    """Any signed-in user (platform level: launcher, own reports)."""
-    supplied=(authorization or '').removeprefix('Bearer ').strip()
-    if not supplied:raise HTTPException(401,'Login required')
-    return _verify(supplied)
+    return {'token':_sign({'kind':'session','role':record['role'],'email':record['email'],'exp':int(time.time()+8*3600)}),'role':record['role'],'expires_in':28800}
 
 async def auth(authorization: str | None = Header(None)):
-    """DID Replacement app access. Returns the user's role inside the DID app (admin/operator)."""
-    ident=await identity(authorization)
-    return await asyncio.to_thread(platform.did_role,ident.get('email',''),ident.get('role',''))
+    supplied=(authorization or '').removeprefix('Bearer ').strip()
+    if not supplied:raise HTTPException(401,'Login required')
+    return _verify(supplied)['role']
 
 async def admin_only(role=Depends(auth)):
     if role!='admin':raise HTTPException(403,'Administrator permission required')
@@ -217,7 +216,7 @@ async def identity_audit_middleware(request: Request, call_next):
     return response
 
 @app.post('/api/auth/logout')
-async def logout(ident=Depends(identity)):
+async def logout(role=Depends(auth)):
     # Middleware records the identity and logout action. The client then discards its token.
     return {'ok':True}
 
@@ -268,22 +267,9 @@ async def acknowledge_recovery(body:RecoveryAcknowledgement,role=Depends(admin_o
 
 def replace_rows(name, headers, rows):
     ws = worksheet(sheet(), name, headers)
-    # Write the replacement before removing stale trailing rows. A failed write
-    # must not erase the existing sheet (the previous clear-first behavior did).
-    # This is NOT a transaction: concurrent workers still require an external lock.
-    old_count=max(0,len(ws.get_all_values())-1)
-    new_count=len(rows)
+    # Clear stale rows before updating; do not retry either write blindly.
+    ws.clear()
     ws.update(range_name='A1',values=[headers]+rows,value_input_option='RAW')
-    # Verify replacement rows before deleting old trailing data. Do not clear on partial writes.
-    written=ws.get_all_values()[:new_count+1]
-    expected_ids=[str(row[0]) for row in rows]
-    if len(written)<new_count+1 or [str(row[0]) if row else '' for row in written[1:]]!=expected_ids:
-        raise RuntimeError('Google Sheets write verification failed; trailing rows preserved')
-    if old_count>new_count:
-        from gspread.utils import rowcol_to_a1
-        start=rowcol_to_a1(new_count+2,1)
-        end=rowcol_to_a1(old_count+1,len(headers))
-        ws.batch_clear([f'{start}:{end}'])
     invalidate_snapshots(name,'inventory')
 
 def token_headers():
@@ -366,20 +352,11 @@ async def snapshot(lists):
 
 import sys
 work=Workflows(sys.modules[__name__])
-from .platform_access import Platform
-platform=Platform(sys.modules[__name__])
 
-@app.get('/api/me')
-async def me(ident=Depends(identity)):
-    # role = DID app role (kept for the previous UI); apps = what the launcher shows.
-    try:
-        info=await asyncio.to_thread(platform.me,ident.get('email',''),ident.get('role',''))
-    except HTTPException:raise
-    except Exception:
-        log.exception('Platform profile unavailable')
-        info={'email':ident.get('email',''),'apps':[],'degraded':True}
-    did=next((a for a in info.get('apps',[]) if a['id']=='did'),None)
-    return {**info,'role':(did or {}).get('role') or ident['role'],'email':ident.get('email','')}
+@app.get('/api/me',dependencies=[Depends(auth)])
+async def me(authorization: str | None = Header(None)):
+    identity=_verify((authorization or '').removeprefix('Bearer ').strip())
+    return {'role':identity['role'],'email':identity.get('email','')}
 
 @app.get('/api/settings',dependencies=[Depends(auth)])
 async def get_settings(role=Depends(auth)):
@@ -442,210 +419,14 @@ async def settings_history(role=Depends(admin_only)):
     from .workflows import SETTING_LOG_HEADERS
     return {'items':(await asyncio.to_thread(work.read,'Settings_Audit_Log',SETTING_LOG_HEADERS))[-200:]}
 
-# Public support intake: unauthenticated, but validated against assigned agents.
-# In-memory throttling is a best-effort anti-spam measure on a single Render worker.
-PUBLIC_REQUEST_EVENTS=['time_ist','submission_id','request_id','agent_number','event','repeat_count','source','issue_summary','submitted_employee_name','submitted_email']
-PUBLIC_REQUEST_RATE={}
-PUBLIC_REQUEST_LOCK=threading.Lock()
-
-class PublicSupportRequest(BaseModel):
-    agent_number: str = Field(min_length=10,max_length=20)
-    employee_name: str = Field(min_length=2,max_length=120)
-    email: str = Field(min_length=5,max_length=254)
-    issue_summary: str = Field(min_length=10,max_length=500)
-    website: str = ''  # Honeypot: must remain empty
-    turnstile_token: str = Field(default='', max_length=2048)
-
-async def verify_public_turnstile(token: str):
-    """Fail closed; never accept an unverified public support submission."""
-    secret=os.getenv('TURNSTILE_SECRET_KEY','').strip()
-    expected_host=os.getenv('TURNSTILE_EXPECTED_HOSTNAME','').strip().lower()
-    if not secret or not expected_host:
-        raise HTTPException(503,'Support form verification is not configured. Please contact support.')
-    if not token or len(token)>2048:
-        raise HTTPException(400,'Complete the security check before submitting.')
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response=await client.post('https://challenges.cloudflare.com/turnstile/v0/siteverify',
-                data={'secret':secret,'response':token})
-            response.raise_for_status()
-            result=response.json()
-    except (httpx.HTTPError,ValueError):
-        log.warning('Turnstile verification service unavailable')
-        raise HTTPException(503,'Security verification is temporarily unavailable. Please retry.')
-    if result.get('success') is not True or str(result.get('hostname','')).lower()!=expected_host:
-        raise HTTPException(400,'Security verification failed or expired. Please retry.')
-
-@app.post('/api/admin/recover-requests')
-async def recover_request_snapshots(role=Depends(admin_only)):
-    """Reconcile ticket snapshots against append-only mutation journal."""
-    async with lock:
-        return await asyncio.to_thread(work.recover_requests)
-
-@app.get('/support-request',include_in_schema=False)
-async def public_request_page():
-    html=(Path(__file__).parent/'public_request.html').read_text(encoding='utf-8')
-    from fastapi.responses import HTMLResponse
-    import json
-    site_key=os.getenv('TURNSTILE_SITE_KEY','').strip()
-    html=html.replace('__TURNSTILE_SITE_KEY_JSON__',json.dumps(site_key))
-    return HTMLResponse(html,headers={'Cache-Control':'no-store'})
-
-@app.post('/api/public/support-request')
-async def public_support_request(payload:PublicSupportRequest, request:Request):
-    if payload.website.strip():raise HTTPException(400,'Invalid submission')
-    await verify_public_turnstile(payload.turnstile_token)
-    phone=work.phone(payload.agent_number)
-    submitted_name=' '.join(payload.employee_name.strip().split())
-    submitted_email=payload.email.strip().lower()
-    if not submitted_name or '@' not in submitted_email or submitted_email.count('@')!=1 or '.' not in submitted_email.rsplit('@',1)[-1]:
-        raise HTTPException(422,'Enter a valid employee name and email address')
-    # Validate the submitted identity on the server, not only in the browser.
-    # Indian mobile numbers must begin 6-9. Reject obvious fabricated sequences.
-    if not re.fullmatch(r'[6-9][0-9]{9}', phone):
-        raise HTTPException(422,'Enter a valid 10-digit Indian mobile number')
-    if len(set(phone)) == 1 or phone in ('9876543210','9876543211','8765432109','9999999999','8888888888','7777777777','6666666666'):
-        raise HTTPException(422,'Enter your registered mobile number, not a sample number')
-    if not re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,119}", submitted_name) or len(submitted_name.replace(' ',''))<3:
-        raise HTTPException(422,'Enter your full registered employee name')
-    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9._%+\-]{0,62}[a-z0-9])?@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",submitted_email,re.I):
-        raise HTTPException(422,'Enter a valid official employee email address')
-    local,domain=submitted_email.rsplit('@',1)
-    if domain not in {'u-next.com','onlinemanipal.com','mahe.onlinemanipal.com'}:
-        raise HTTPException(422,'Use your registered LSQ email address from an approved company domain')
-    if domain in {'example.com','example.org','example.net','test.com','test.org','invalid.com','mailinator.com','tempmail.com','10minutemail.com','yopmail.com'} or local in {'test','testing','dummy','sample','example','abc','abcd','admin','user','name'}:
-        raise HTTPException(422,'Enter your registered official email address, not a test address')
-    # Bound repeated submissions per IP and agent without recording the visitor IP in Sheets.
-    client=request.client.host if request.client else 'unknown'
-    key=hashlib.sha256((client+':'+phone).encode()).hexdigest()
-    with PUBLIC_REQUEST_LOCK:
-        now=time.monotonic()
-        recent=[t for t in PUBLIC_REQUEST_RATE.get(key,[]) if now-t<3600]
-        if len(recent)>=5:raise HTTPException(429,'Too many submissions. Please try again later.')
-        recent.append(now);PUBLIC_REQUEST_RATE[key]=recent
-        # Bound memory growth from distinct visitors; entries expire after one hour.
-        if len(PUBLIC_REQUEST_RATE)>2000:
-            for stale_key,stamps in list(PUBLIC_REQUEST_RATE.items()):
-                kept=[t for t in stamps if now-t<3600]
-                if kept:PUBLIC_REQUEST_RATE[stale_key]=kept
-                else:PUBLIC_REQUEST_RATE.pop(stale_key,None)
-    if lock.locked():raise HTTPException(409,'Support operations are busy; please retry shortly')
-    async with lock:
-        try:
-            # Require an unambiguous active DID assignment; do not accept client-supplied DID.
-            active=await asyncio.to_thread(work.read,'Active_DIDs',DID_HEADERS)
-            matches=[r for r in active if work.phone(r.get('agent_no') or r.get('agent_number'))==phone]
-            if len(matches)!=1:raise HTTPException(422,'Agent does not have one unique active DID assignment. Contact support.')
-            directory=await asyncio.to_thread(work.employees)
-            employees=[r for r in directory if work.phone(r.get('agent_number'))==phone]
-            if len(employees)!=1:raise HTTPException(422,'Agent not uniquely found in the employee directory')
-            employee=employees[0]
-            known_email=str(employee.get('email') or '').strip().lower()
-            known_name=str(employee.get('agent_name') or employee.get('employee_name') or employee.get('name') or '').strip()
-            if not known_email or not known_name:
-                raise HTTPException(422,'Employee directory record is incomplete. Contact support to update your registered name and email.')
-            if submitted_email!=known_email:
-                raise HTTPException(422,'Email does not match the registered employee record')
-            if known_name and ''.join(c for c in submitted_name.casefold() if c.isalnum())!=''.join(c for c in known_name.casefold() if c.isalnum()):
-                raise HTTPException(422,'Employee name does not match the registered record')
-            await asyncio.to_thread(work.recover_requests)
-            rows=await asyncio.to_thread(work.requests)
-            existing=next((r for r in rows if work.phone(r.get('agent_number'))==phone and str(r.get('current_did'))==str(matches[0].get('did_no')) and r.get('status') in ('pending','review_required','approved','processing')),None)
-            stamp=work.now(); submission_id=str(uuid.uuid4()); recent=await asyncio.to_thread(work.recent_agents,3)
-            if existing:
-                # Form submissions are not phone calls: never alter call counters or timestamps.
-                await asyncio.to_thread(work.update_request,existing)
-                req=existing; event='REPEAT_PUBLIC_SUBMISSION'
-            else:
-                req=dict.fromkeys(REQUEST_HEADERS,'')
-                req.update(request_id=str(uuid.uuid4()),callid='',callto=phone,agent_number=phone,agent_name=matches[0].get('agent_name') or employees[0].get('agent_name',''),agent_email=employees[0].get('email',''),current_did=str(matches[0].get('did_no','')),first_call_utc=stamp,last_call_utc='',call_count=0,status='review_required' if phone in recent else 'pending',recent_warning='yes' if phone in recent else 'no',reminder_count=0)
-                await asyncio.to_thread(work.update_request,req)
-                event='PUBLIC_REQUEST_CREATED'
-            # Persist each submission even when merged into an existing pending request.
-            await asyncio.to_thread(work.append,'Public_Request_Events',PUBLIC_REQUEST_EVENTS,[stamp,submission_id,req['request_id'],phone,event,str(1+sum(1 for e in await asyncio.to_thread(work.read,'Public_Request_Events',PUBLIC_REQUEST_EVENTS) if str(e.get('request_id'))==str(req['request_id']))),'public_form',payload.issue_summary.strip(),submitted_name,submitted_email])
-            try:await asyncio.to_thread(work.ticket_event,req,'TICKET_CREATED' if event=='PUBLIC_REQUEST_CREATED' else 'FORM_ATTACHED','form','employee','Support form submitted')
-            except Exception:log.exception('Ticket event audit failed for public request')
-            return {'ok':True,'request_id':req['request_id'],'ticket_no':'SH-'+str(req['request_id']).replace('-','')[:12].upper(),'repeated':event=='REPEAT_PUBLIC_SUBMISSION','message':'Request received by the support team.'}
-        except HTTPException:raise
-        except Exception:
-            log.exception('Public support request failed')
-            raise HTTPException(503,'Unable to save the request. Please try again later.')
-
 @app.get('/api/requests',dependencies=[Depends(auth)])
-async def get_requests():
-    # Derive channel from immutable call/form event logs, not from the last
-    # update to Pending_Requests. One open request may have BOTH sources.
-    items=await asyncio.to_thread(work.requests)
-    form_events=await asyncio.to_thread(work.read,'Public_Request_Events',PUBLIC_REQUEST_EVENTS)
-    call_events=await asyncio.to_thread(work.read,'Call_Request_Events',CALL_HEADERS)
-    channels={}
-    for event in form_events:
-        rid=str(event.get('request_id') or '')
-        if rid:
-            channels.setdefault(rid,{'form':0,'call':0})['form']+=1
-    for event in call_events:
-        rid=str(event.get('request_id') or '')
-        if rid:
-            channels.setdefault(rid,{'form':0,'call':0})['call']+=1
-    latest_forms={}
-    for event in form_events:
-        rid=str(event.get('request_id') or '')
-        when=_ticket_timestamp(event.get('time_ist'))
-        if rid and when and (rid not in latest_forms or when>latest_forms[rid]):latest_forms[rid]=when
-    for item in items:
-        rid=str(item.get('request_id') or '')
-        counts=channels.get(rid,{'form':0,'call':0})
-        # Backward compatibility for historic requests without source events.
-        if not counts['form'] and not counts['call'] and item.get('callid'):
-            try: legacy_calls=max(1,int(item.get('call_count') or 1))
-            except (ValueError,TypeError): legacy_calls=1
-            counts={'form':0,'call':legacy_calls}
-        item['source_counts']=dict(counts)
-        item['total_interactions']=counts['call']+counts['form']
-        last_candidates=[v for v in (_ticket_timestamp(item.get('last_call_utc')),latest_forms.get(rid)) if v]
-        item['last_activity_utc']=max(last_candidates).isoformat() if last_candidates else str(item.get('first_call_utc') or '')
-        item['request_source']='both' if counts['form'] and counts['call'] else 'form' if counts['form'] else 'call' if counts['call'] else 'unknown'
-        item['ticket_no']='SH-'+rid.replace('-','')[:12].upper()
-    return {'items':items}
-
-def _ticket_timestamp(value):
-    """Parse stored ISO/IST timestamps to UTC for ordering and comparison."""
-    raw=str(value or '').strip()
-    if not raw:return None
-    try:
-        parsed=datetime.fromisoformat(raw.replace('Z','+00:00'))
-        return parsed.replace(tzinfo=IST) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
-    except (ValueError,TypeError):return None
-
-@app.get('/api/requests/{request_id}/timeline',dependencies=[Depends(auth)])
-async def request_timeline(request_id:str):
-    """Read-only ticket history, sourced from immutable call/form/change events."""
-    items=await asyncio.to_thread(work.requests)
-    req=next((r for r in items if str(r.get('request_id'))==request_id),None)
-    if req is None:raise HTTPException(404,'Ticket not found')
-    forms=await asyncio.to_thread(work.read,'Public_Request_Events',PUBLIC_REQUEST_EVENTS)
-    calls=await asyncio.to_thread(work.read,'Call_Request_Events',CALL_HEADERS)
-    audits=await asyncio.to_thread(work.read,'Ticket_Events',TICKET_EVENT_HEADERS)
-    timeline=[]
-    for e in calls:
-        if str(e.get('request_id'))==request_id:
-            timeline.append({'time':e.get('starttime') or e.get('ingested_utc'),'type':'Call','detail':'Inbound cancelled call','event_id':str(e.get('callid') or '')})
-    for e in forms:
-        if str(e.get('request_id'))==request_id:
-            timeline.append({'time':e.get('time_ist'),'type':'Form','detail':str(e.get('issue_summary') or '')[:500],'event_id':str(e.get('submission_id') or '')})
-    for e in audits:
-        if str(e.get('request_id'))==request_id and str(e.get('event')) not in ('TICKET_CREATED','FORM_ATTACHED','CALL_ATTACHED'):
-            timeline.append({'time':e.get('timestamp_ist'),'type':e.get('event'),'detail':str(e.get('details') or '')[:500],'event_id':str(e.get('event_id') or '')})
-    timeline.sort(key=lambda e:_ticket_timestamp(e.get('time')) or datetime.min.replace(tzinfo=timezone.utc))
-    return {'ticket_no':work.ticket_no(request_id),'request':req,'events':timeline,'source_counts':{'call':sum(1 for e in calls if str(e.get('request_id'))==request_id),'form':sum(1 for e in forms if str(e.get('request_id'))==request_id)}}
+async def get_requests():return {'items':await asyncio.to_thread(work.requests)}
 
 @app.post('/api/requests/sync',dependencies=[Depends(auth)])
 async def sync_requests():
     if lock.locked():raise HTTPException(409,'Another operation is in progress')
     async with lock:
-        try:
-            await asyncio.to_thread(work.recover_requests)
-            return await work.sync_calls()
+        try:return await work.sync_calls()
         except HTTPException:raise
         except Exception as exc:
             log.exception('Call sync failed');raise HTTPException(502,f'Call sync failed: {str(exc) if isinstance(exc,RuntimeError) else type(exc).__name__}')
@@ -711,9 +492,7 @@ async def run_reminders():
 @app.post('/api/requests/{request_id}/review')
 async def review_request(request_id:str,body:Review,role=Depends(auth)):
     if lock.locked():raise HTTPException(409,'Another operation is in progress')
-    async with lock:
-        await asyncio.to_thread(work.recover_requests)
-        return await asyncio.to_thread(work.review,request_id,body.approved,body.reason,role)
+    async with lock:return await asyncio.to_thread(work.review,request_id,body.approved,body.reason,role)
 
 @app.get('/api/notifications',dependencies=[Depends(auth)])
 async def notifications():
@@ -857,226 +636,6 @@ async def stop_queue_worker():
         try: await queue_worker_task
         except asyncio.CancelledError: pass
 
-
-@app.get('/api/public/config')
-async def public_config():
-    return {'turnstile_site_key':os.getenv('TURNSTILE_SITE_KEY','').strip()}
-
-# Dedicated external scheduler. Never use /api/health to perform writes.
-SYNC_JOB_HEADERS=['job','last_attempt_utc','last_success_utc','status','details']
-SYNC_INTERVALS={'calls':5,'inventory':15,'employees':60,'recovery':15}
-
-# Intervals configured in the UI (App_Settings). SYNC_INTERVALS above stays as the fallback
-# when a setting is missing or invalid; floors stop a typo from hammering MCube / Google Sheets.
-JOB_SETTING_KEYS={'calls':'auto_calls_minutes','inventory':'auto_inventory_minutes','employees':'auto_employee_minutes'}
-JOB_MIN_MINUTES={'calls':2,'inventory':5,'employees':30,'recovery':15,'history':30}
-HISTORY_INTERVAL_MINUTES=60
-
-def job_intervals(cfg=None):
-    out=dict(SYNC_INTERVALS)
-    for job,key in JOB_SETTING_KEYS.items():
-        try:value=int((cfg or {}).get(key))
-        except (TypeError,ValueError):continue
-        out[job]=max(JOB_MIN_MINUTES[job],min(value,10000))
-    return out
-
-async def _load_intervals():
-    try:return job_intervals(await asyncio.to_thread(work.settings))
-    except Exception:
-        log.exception('Could not read App_Settings; using default sync intervals')
-        return dict(SYNC_INTERVALS)
-
-def _last_success(rows):
-    latest={}
-    for row in rows:latest[str(row.get('job',''))]=row
-    out={}
-    for job,row in latest.items():
-        try:
-            when=datetime.fromisoformat(str(row.get('last_success_utc') or '').replace('Z','+00:00'))
-            if when.tzinfo is None:when=when.replace(tzinfo=timezone.utc)
-            out[job]=when
-        except (ValueError,TypeError):pass
-    return out
-
-def pick_due_job(rows,intervals,now=None):
-    """Most overdue job by UI interval; None when nothing is due. Never-run jobs are due first."""
-    now=now or datetime.now(timezone.utc)
-    last=_last_success(rows)
-    best=None;best_over=0.0
-    for job,minutes in intervals.items():
-        when=last.get(job)
-        over=float('inf') if when is None else (now-when).total_seconds()-minutes*60
-        if over>=0 and (best is None or over>best_over):best,best_over=job,over
-    return best
-
-def _cron_authorized(value):
-    expected=os.getenv('CRON_SYNC_SECRET','')
-    return bool(expected and value and hmac.compare_digest(expected,value))
-
-@app.post('/api/jobs/sync')
-async def scheduled_sync(x_cron_secret: str | None = Header(default=None)):
-    if not _cron_authorized(x_cron_secret):
-        raise HTTPException(401,'Unauthorized')
-    now=datetime.now(IST)
-    # 08:30 to 23:10 IST. Cron itself should only run during this window.
-    minute=now.hour*60+now.minute
-    if minute < 8*60+30 or minute > 23*60+10:
-        return {'status':'outside_business_hours','timezone':'Asia/Kolkata'}
-    if lock.locked():
-        return {'status':'busy','retry':True}
-    async with lock:
-        rows=await asyncio.to_thread(work.read,'Sync_Jobs',SYNC_JOB_HEADERS)
-        latest={}
-        for row in rows:
-            latest[str(row.get('job',''))]=row
-        due=[]
-        utc_now=datetime.now(timezone.utc)
-        for job,minutes in (await _load_intervals()).items():
-            last=latest.get(job,{}).get('last_success_utc','')
-            try:
-                last_dt=datetime.fromisoformat(str(last).replace('Z','+00:00'))
-                if last_dt.tzinfo is None:last_dt=last_dt.replace(tzinfo=timezone.utc)
-                if (utc_now-last_dt).total_seconds()<minutes*60:continue
-            except (ValueError,TypeError):pass
-            due.append(job)
-        results={}
-        for job in due:
-            stamp=datetime.now(timezone.utc).isoformat()
-            success=latest.get(job,{}).get('last_success_utc','')
-            status='success';detail='ok'
-            try:
-                if job=='calls':
-                    await asyncio.to_thread(work.recover_requests)
-                    await work.sync_calls()
-                elif job=='inventory':
-                    async with httpx.AsyncClient(timeout=35) as client:lists=await fetch_lists(client)
-                    await asyncio.to_thread(snapshot_sync,lists)
-                elif job=='employees':await work.fetch_employee_directory()
-                elif job=='recovery':await asyncio.to_thread(work.recover_requests)
-                success=datetime.now(timezone.utc).isoformat()
-            except Exception as exc:
-                log.exception('Scheduled sync %s failed',job)
-                status='failed';detail=type(exc).__name__
-            # Append history, do not rewrite the job ledger. Failure remains visible to scheduler.
-            try:await asyncio.to_thread(work.append,'Sync_Jobs',SYNC_JOB_HEADERS,[job,stamp,success,status,detail])
-            except Exception:
-                log.exception('Failed recording scheduled job %s',job)
-                status='unrecorded'
-            results[job]=status
-        return {'status':'completed','jobs':results,'timezone':'Asia/Kolkata'}
-
-# v79: independent, fast-acknowledging scheduled jobs. Acknowledgment is not completion.
-# Only one process/worker is supported; the task can be interrupted by Render restart.
-SPLIT_JOB_NAMES=frozenset({*SYNC_INTERVALS,'history'})
-_split_task=None
-_split_active=None
-_split_started=None
-
-async def _split_log(job, attempt, last_success, status, detail):
-    await asyncio.to_thread(work.append,'Sync_Jobs',SYNC_JOB_HEADERS,
-                            [job,attempt,last_success,status,str(detail)[:300]])
-
-async def _split_execute(job):
-    global _split_active,_split_started
-    attempt=datetime.now(timezone.utc).isoformat()
-    last_success=''
-    try:
-        async with lock:
-            # Record intent before contacting MCube. A restart leaves a visible 'running' row.
-            rows=await asyncio.to_thread(work.read,'Sync_Jobs',SYNC_JOB_HEADERS)
-            history=[r for r in rows if str(r.get('job',''))==job]
-            if history:
-                last_success=str(history[-1].get('last_success_utc') or '')
-                try:
-                    when=datetime.fromisoformat(last_success.replace('Z','+00:00'))
-                    if when.tzinfo is None:when=when.replace(tzinfo=timezone.utc)
-                    intervals={**(await _load_intervals()),'history':HISTORY_INTERVAL_MINUTES}
-                    if (datetime.now(timezone.utc)-when).total_seconds()<intervals.get(job,15)*60:
-                        return
-                except (ValueError,TypeError):pass
-            await _split_log(job,attempt,last_success,'running','Scheduled job started')
-            try:
-                if job=='calls':
-                    await asyncio.to_thread(work.recover_requests)
-                    await work.sync_calls()
-                elif job=='inventory':
-                    async with httpx.AsyncClient(timeout=25) as client:
-                        lists=await fetch_lists(client)
-                    await asyncio.to_thread(snapshot_sync,lists)
-                elif job=='employees':
-                    await work.fetch_employee_directory()
-                elif job=='recovery':
-                    await asyncio.to_thread(work.recover_requests)
-                elif job=='history':
-                    await asyncio.to_thread(sync_agent_replacement_history)
-                last_success=datetime.now(timezone.utc).isoformat()
-                await _split_log(job,attempt,last_success,'success','Completed')
-            except asyncio.CancelledError:
-                # Best effort only; abrupt container shutdown cannot guarantee this write.
-                try:await _split_log(job,attempt,last_success,'interrupted','Worker cancelled')
-                except Exception:log.exception('Could not record cancellation')
-                raise
-            except Exception as exc:
-                log.exception('Split scheduled job %s failed',job)
-                try:await _split_log(job,attempt,last_success,'failed',type(exc).__name__)
-                except Exception:log.exception('Could not record job failure')
-    except asyncio.CancelledError:raise
-    except Exception:log.exception('Split scheduled job %s setup failed',job)
-    finally:
-        _split_active=None
-        _split_started=None
-
-def _start_split(job):
-    global _split_task,_split_active,_split_started
-    _split_active=job
-    _split_started=datetime.now(timezone.utc).isoformat()
-    _split_task=asyncio.create_task(_split_execute(job))
-    return JSONResponse(status_code=202,content={
-        'status':'accepted','job':job,'started_utc':_split_started,
-        'message':'Job queued in this Render process; acceptance does not mean completion.'})
-
-# v86: one cron entry for everything. Call every 1-2 minutes; the backend runs the single most
-# overdue job according to the intervals configured in the UI (App_Settings).
-@app.post('/api/jobs/sync/auto')
-async def auto_scheduled_sync(x_cron_secret: str | None = Header(default=None)):
-    if not _cron_authorized(x_cron_secret):raise HTTPException(401,'Unauthorized')
-    now=datetime.now(IST)
-    minute=now.hour*60+now.minute
-    if minute<8*60+30 or minute>23*60+10:
-        return {'status':'outside_business_hours','timezone':'Asia/Kolkata'}
-    if lock.locked() or (_split_task is not None and not _split_task.done()):
-        return {'status':'busy','active_job':_split_active,'retry':True}
-    intervals={**(await _load_intervals()),'history':HISTORY_INTERVAL_MINUTES}
-    rows=await asyncio.to_thread(work.read,'Sync_Jobs',SYNC_JOB_HEADERS)
-    job=pick_due_job(rows,intervals)
-    if not job:return {'status':'idle','intervals_minutes':intervals,'timezone':'Asia/Kolkata'}
-    return _start_split(job)
-
-@app.post('/api/jobs/sync/{job}')
-async def split_scheduled_sync(job: str, x_cron_secret: str | None = Header(default=None)):
-    global _split_task,_split_active,_split_started
-    if not _cron_authorized(x_cron_secret):raise HTTPException(401,'Unauthorized')
-    if job not in SPLIT_JOB_NAMES:raise HTTPException(404,'Unknown scheduled job')
-    now=datetime.now(IST)
-    minute=now.hour*60+now.minute
-    if minute<8*60+30 or minute>23*60+10:
-        return {'status':'outside_business_hours','job':job,'timezone':'Asia/Kolkata'}
-    if lock.locked() or (_split_task is not None and not _split_task.done()):
-        return {'status':'busy','job':job,'active_job':_split_active,'retry':True}
-    return _start_split(job)
-
-@app.get('/api/jobs/runner-status',dependencies=[Depends(auth)])
-async def split_runner_status():
-    return {'active_job':_split_active,'started_utc':_split_started,
-            'running':bool(_split_task is not None and not _split_task.done())}
-
-@app.get('/api/jobs/status',dependencies=[Depends(auth)])
-async def scheduled_sync_status():
-    rows=await asyncio.to_thread(work.read,'Sync_Jobs',SYNC_JOB_HEADERS)
-    latest={}
-    for row in rows:latest[str(row.get('job',''))]=row
-    return {'jobs':latest,'timezone':'Asia/Kolkata'}
-
 @app.get('/api/health')
 async def health(): return {'status':'ok'}
 
@@ -1158,19 +717,9 @@ def snapshot_sync(lists):
 async def batch_status(): return dict(state)
 
 @app.get('/api/logs',dependencies=[Depends(auth)])
-async def logs(days: int = 0):
-    # Default unchanged (last 500 rows). ?days=N (1-120) returns every row of the last N days (max 20000) for trends/reports.
-    try: rows=await asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS)
+async def logs():
+    try: return {'items':(await asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS))[-500:]}
     except Exception: raise HTTPException(503,'Cannot read audit log')
-    if days<=0:return {'items':rows[-500:]}
-    cutoff=datetime.now(IST)-timedelta(days=min(120,days))
-    def recent(r):
-        try:
-            t=datetime.fromisoformat(str(r.get('time_utc','')).replace('Z','+00:00'))
-            return (t if t.tzinfo else t.replace(tzinfo=timezone.utc))>=cutoff
-        except ValueError:return False
-    out=[r for r in rows if recent(r)][-20000:]
-    return {'items':out,'days':min(120,days),'truncated':len(out)==20000}
 
 def sync_agent_replacement_history():
     """Idempotent reconciliation from the authoritative Change_Logs journal.
@@ -1180,7 +729,7 @@ def sync_agent_replacement_history():
     ws=worksheet(sheet(),'Agent_Replacement_History',AGENT_HISTORY_HEADERS)
     existing=_quota_call(lambda: ws.get_all_records(numericise_ignore=['all']))
     known={str(r.get('event_id','')) for r in existing}
-    employees=get_rows('Employee_Directory',EMP_HEADERS)
+    employees=get_rows('Employee_Directory',work.EMP_HEADERS)
     by_phone={work.phone(str(e.get('agent_number',''))):e for e in employees}
     pending=[]
     for index,event in enumerate(logs,2):
@@ -1213,7 +762,7 @@ async def employee_email_lookup():
         # Read raw values to tolerate blank/duplicate header cells and malformed Sheets metadata.
         # Never infer email from agent name; agent_number is the sole join key.
         def read_directory_raw():
-            ws=worksheet(sheet(),'Employee_Directory',EMP_HEADERS)
+            ws=worksheet(sheet(),'Employee_Directory',work.EMP_HEADERS)
             values=_quota_call(lambda: ws.get_all_values())
             if not values:return []
             headers=[str(v).strip().lower().replace(' ','_') for v in values[0]]
@@ -1249,7 +798,7 @@ async def agent_profile(agent_number:str):
     if not phone or len(phone)<8:raise HTTPException(400,'Invalid agent number')
     try:
         employees,requests,logs,history=await asyncio.gather(
-            asyncio.to_thread(get_rows,'Employee_Directory',EMP_HEADERS),
+            asyncio.to_thread(get_rows,'Employee_Directory',work.EMP_HEADERS),
             asyncio.to_thread(work.requests),
             asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS),
             asyncio.to_thread(get_rows,'Agent_Replacement_History',AGENT_HISTORY_HEADERS))
@@ -1264,66 +813,13 @@ async def agent_profile(agent_number:str):
             if key not in known:
                 related_history.append({'completed_at_ist':e.get('time_utc',''),'batch_id':key[0],'old_did':key[1],'new_did':key[2],'agent_number':phone,'agent_name':e.get('agent_name',''),'result':'SUCCESS','source':'Change_Logs (not yet synced)'})
                 known.add(key)
-        agent_events=_lifecycle_events(logs,phone=phone)
         related_history.sort(key=lambda r:str(r.get('completed_at_ist','')),reverse=True)
         related_requests.sort(key=lambda r:str(r.get('first_call_utc','')),reverse=True)
-        return {'agent_number':phone,'employee':employee,'requests':related_requests,'replacements':related_history,'replacement_count':len(related_history),'request_count':len(related_requests),'lifecycle_events':agent_events,'history_scope':'Only logged operations and recorded requests are available; missing historical periods are unknown.'}
+        return {'agent_number':phone,'employee':employee,'requests':related_requests,'replacements':related_history,'replacement_count':len(related_history),'request_count':len(related_requests)}
     except HTTPException:raise
     except Exception as exc:
         log.exception('Agent profile load failed')
         raise HTTPException(503,'Unable to read agent profile from Google Sheets') from exc
-
-# v81 Phase 1: read-only DID lifecycle intelligence derived from the existing
-# append-only Change_Logs journal. No extra MCube calls or Sheets writes.
-def _lifecycle_events(logs, *, phone='', did=''):
-    events=[]
-    for row in logs:
-        agent=work.phone(str(row.get('agent_number','')))
-        old=str(row.get('old_did','')).strip(); new=str(row.get('new_did','')).strip()
-        if phone and agent!=phone:continue
-        if did and did not in (old,new):continue
-        events.append({'time_ist':str(row.get('time_utc','')),'event':str(row.get('event','')),
-          'agent_number':agent,'agent_name':str(row.get('agent_name','')),
-          'old_did':old,'new_did':new,'batch_id':str(row.get('batch_id','')),
-          'result':str(row.get('result','')),'details':str(row.get('details','')),
-          'source':'Change_Logs'})
-    return sorted(events,key=lambda x:x['time_ist'],reverse=True)
-
-@app.get('/api/intelligence/current-conflicts',dependencies=[Depends(auth)])
-async def current_did_conflicts():
-    """Snapshot-only duplicates; never claim historical overlap from snapshots."""
-    try:
-        rows=await asyncio.to_thread(get_rows,'Active_DIDs',DID_HEADERS)
-        by_did={};by_agent={}
-        for row in rows:
-            did=str(row.get('did_no','')).strip();agent=work.phone(str(row.get('agent_no','')))
-            if did and agent:by_did.setdefault(did,set()).add(agent);by_agent.setdefault(agent,set()).add(did)
-        return {'duplicate_dids':[{'did':k,'agent_numbers':sorted(v)} for k,v in by_did.items() if len(v)>1],
-          'agents_with_multiple_dids':[{'agent_number':k,'dids':sorted(v)} for k,v in by_agent.items() if len(v)>1],
-          'scope':'Current Active_DIDs snapshot only. Historical overlap cannot be confirmed without complete assignment intervals.'}
-    except Exception as exc:
-        log.exception('Conflict check failed')
-        raise HTTPException(503,'Unable to read current DID snapshot') from exc
-
-@app.get('/api/dids/{did}/passport',dependencies=[Depends(auth)])
-async def did_passport(did:str):
-    did=did.strip()
-    if not re.fullmatch(r'\d{8,15}',did):raise HTTPException(422,'Invalid DID number')
-    try:
-        logs,active=await asyncio.gather(asyncio.to_thread(get_rows,'Change_Logs',LOG_HEADERS),
-          asyncio.to_thread(get_rows,'Active_DIDs',DID_HEADERS))
-        events=_lifecycle_events(logs,did=did)
-        current=[{'agent_number':work.phone(str(r.get('agent_no',''))),'agent_name':str(r.get('agent_name','')),
-          'operator':str(r.get('operator',''))} for r in active if str(r.get('did_no','')).strip()==did]
-        distinct_agents=sorted({e['agent_number'] for e in events if e['agent_number']})
-        return {'did':did,'current_assignments':current,'events':events,'event_count':len(events),
-          'historical_agents_in_journal':len(distinct_agents),
-          'history_scope':'Only events captured by Change_Logs. Earlier assignments and exact start/end times may be unknown.',
-          'current_snapshot_warning':'Current assignment is from last synchronized Active_DIDs snapshot, not a live MCube query.'}
-    except HTTPException:raise
-    except Exception as exc:
-        log.exception('DID passport read failed')
-        raise HTTPException(503,'Unable to read DID lifecycle') from exc
 
 @app.get('/api/insights',dependencies=[Depends(auth)])
 async def insights():
@@ -1359,12 +855,12 @@ async def insights():
             employee=lookup.get(phone,{})
             manager=str(employee.get('role5') or 'Unassigned').strip() or 'Unassigned'
             tl=str(employee.get('role4') or 'Unassigned').strip() or 'Unassigned'
-            raw_count=str(r.get('call_count') or '0')
-            count=max(0,int(raw_count)) if raw_count.isdigit() else 0
+            count=int(str(r.get('call_count') or '1')) if str(r.get('call_count') or '1').isdigit() else 1
+            count=max(1,count)
             status=str(r.get('status') or 'unknown').strip().lower()
             statuses[status]+=1
             team=leaders[(manager,tl)]
-            team['requests']+=1;team['repeat_calls']+=max(0,count-1)
+            team['requests']+=1;team['repeat_calls']+=count-1
             team['completed']+=int(status=='completed')
             team['pending']+=int(status in ('pending','approved','processing'))
             team['review_required']+=int(status=='review_required')
@@ -1525,8 +1021,6 @@ async def run_batch(batch,dids,request_map,lease):
                         if req:
                             req['status']='completed';req['replacement_new_did']=new;req['completed_utc']=work.now()
                             await asyncio.to_thread(work.update_request,req)
-                            try:await asyncio.to_thread(work.ticket_event,req,'COMPLETED','operator','mcube','Old DID deactivated and new DID assignment verified')
-                            except Exception:log.exception('Ticket completion audit failed')
                             cfg=await asyncio.to_thread(work.settings)
                             if cfg['notify_on_completion']:await work.outbound_notification(req,'completed',cfg)
                             if cfg['email_on_completion']:await work.send_email(req,'completed',cfg)
@@ -1549,86 +1043,6 @@ async def run_batch(batch,dids,request_map,lease):
     finally:
         state['running']=False
         await lock.release(lease)
-
-# ---------------- v88 platform: launcher, users, app access, settings, saved reports ----------------
-async def platform_admin(ident=Depends(identity)):
-    me_=await asyncio.to_thread(platform.resolve,ident.get('email',''))
-    if not platform.can_manage(me_):raise HTTPException(403,'User Management permission required')
-    return me_
-
-class PlatformUserInput(BaseModel):
-    email: str = Field(min_length=3,max_length=200)
-    display_name: str = Field(default='',max_length=120)
-    status: Literal['active','disabled'] = 'active'
-    pin: str = Field(default='',max_length=8)
-    default_app: str = Field(default='',max_length=20)
-    notes: str = Field(default='',max_length=300)
-    apps: dict[str,str] = Field(default_factory=dict)
-
-class PlatformSettingsInput(BaseModel):
-    scope: str = Field(min_length=1,max_length=20)
-    values: dict[str,str|int|bool|None]
-
-class SavedReportInput(BaseModel):
-    id: str = Field(default='',max_length=40)
-    name: str = Field(min_length=1,max_length=80)
-    dataset: str = Field(min_length=1,max_length=40)
-    app_id: str = Field(default='did',max_length=20)
-    shared: bool = False
-    config: dict = Field(default_factory=dict)
-
-def _platform_call(fn,*args):
-    try:return fn(*args)
-    except HTTPException:raise
-    except Exception as exc:
-        log.exception('Platform sheet operation failed')
-        raise HTTPException(503,'Google Sheets is unavailable; try again shortly') from exc
-
-@app.get('/api/platform/users')
-async def platform_users(admin=Depends(platform_admin)):
-    return await asyncio.to_thread(_platform_call,platform.list_users)
-
-@app.post('/api/platform/users')
-async def platform_save_user(body:PlatformUserInput,admin=Depends(platform_admin)):
-    return await asyncio.to_thread(_platform_call,platform.save_user,admin,body.model_dump())
-
-@app.get('/api/platform/settings')
-async def platform_settings(admin=Depends(platform_admin)):
-    return await asyncio.to_thread(_platform_call,platform.get_all_settings)
-
-@app.put('/api/platform/settings')
-async def platform_save_settings(body:PlatformSettingsInput,admin=Depends(platform_admin)):
-    return await asyncio.to_thread(_platform_call,platform.save_settings,admin['email'],body.scope,body.values)
-
-@app.get('/api/platform/audit')
-async def platform_audit(admin=Depends(platform_admin)):
-    return {'items':await asyncio.to_thread(_platform_call,platform.audit_rows)}
-
-@app.get('/api/platform/access-log')
-async def platform_access_log(admin=Depends(platform_admin)):
-    rows=await asyncio.to_thread(_platform_call,get_rows,'User_Activity_Logs',ACCESS_HEADERS)
-    return {'items':list(reversed(rows[-1000:]))}
-
-@app.get('/api/platform/reports')
-async def platform_reports(ident=Depends(identity)):
-    return {'items':await asyncio.to_thread(_platform_call,platform.list_reports,ident.get('email',''))}
-
-@app.post('/api/platform/reports')
-async def platform_save_report(body:SavedReportInput,ident=Depends(identity)):
-    return await asyncio.to_thread(_platform_call,platform.save_report,ident.get('email',''),body.model_dump())
-
-@app.delete('/api/platform/reports/{report_id}')
-async def platform_delete_report(report_id:str,ident=Depends(identity)):
-    return await asyncio.to_thread(_platform_call,platform.delete_report,ident.get('email',''),report_id)
-
-@app.get('/api/employees',dependencies=[Depends(auth)])
-async def employee_directory():
-    """Read-only Employee_Directory (MCube employee sync) for Agent 360 active / deactivated lists."""
-    try:rows=await asyncio.to_thread(work.employees)
-    except Exception as exc:raise HTTPException(503,'Unable to read Employee_Directory') from exc
-    keep=('agent_number','agent_name','email','role','status','role3','role4','role5','updated_utc','agent_id')
-    return {'items':[{k:str(r.get(k,'')) for k in keep} for r in rows]}
-
 
 if BASE.exists():
     app.mount('/assets',StaticFiles(directory=BASE/'assets'),name='assets')

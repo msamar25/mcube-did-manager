@@ -93,4 +93,43 @@ t('pool runway from 7-day average', () => {
   assert.deepEqual(r, { perDay: 2, days: 35 });
   assert.equal(poolRunway(10, { items: [{ replacements: 0 }] }).days, null);
 });
+
+// ---- v88: date ranges, range-based trends, custom reports ----
+const C = await import('../src/lib/calc.js');
+const R = await import('../src/lib/reports.js');
+const NOW = Date.parse('2026-10-27T12:00:00Z');
+t('range presets: 7/15/30 days end at IST midnight; custom dates inclusive', () => {
+  const b7 = C.rangeBounds({ preset: '7d' }, NOW), b30 = C.rangeBounds({ preset: '30d' }, NOW);
+  assert.equal((b7.end - b7.start) / 864e5, 7); assert.equal((b30.end - b30.start) / 864e5, 30);
+  assert.equal(b7.end, Date.parse('2026-10-27T18:30:00Z')); // midnight IST after today
+  const c = C.rangeBounds({ preset: 'custom', from: '2026-10-01', to: '2026-10-03' }, NOW);
+  assert.equal(c.days, 3); assert.equal(c.start, Date.parse('2026-09-30T18:30:00Z'));
+  const h = C.rangeBounds({ preset: '24h' }, NOW); assert.ok(h.hourly); assert.equal((h.end - h.start) / 36e5, 24);
+});
+t('utilizationTrend over 7 days equals the 7-day trend', () => {
+  const logs = [{ event: 'REASSIGNMENT_COMPLETE', result: 'SUCCESS', time_utc: '2026-10-25T10:00:00+05:30', old_did: '1', new_did: 'P1' }];
+  const items = [{ did: '1', status: 'inactive', operator: 'A' }, { did: 'P1', status: 'active', agent_number: '9', agent: 'x', operator: 'A' }, { did: 'P2', status: 'pool', operator: 'A' }];
+  const a = C.utilizationTrend(logs, items, C.rangeBounds({ preset: '7d' }, NOW), false, NOW), b = C.utilizationTrend7d(logs, items, NOW);
+  assert.deepEqual(a.items, b.items);
+  const t15 = C.utilizationTrend(logs, items, C.rangeBounds({ preset: '15d' }, NOW), false, NOW);
+  assert.equal(t15.items.length, 15);
+});
+t('poolActivity per day counts replacements inside the range only', () => {
+  const ev = (d) => ({ event: 'REASSIGNMENT_COMPLETE', result: 'SUCCESS', time_utc: d, old_did: 'o', new_did: 'n' });
+  const logs = [ev('2026-10-26T10:00:00+05:30'), ev('2026-10-20T10:00:00+05:30'), ev('2026-09-01T10:00:00+05:30')];
+  const p = C.poolActivity(logs, [{ did: 'x', status: 'pool' }], C.rangeBounds({ preset: '7d' }, NOW), true);
+  assert.equal(p.items.length, 7); assert.equal(p.assigned, 1); assert.equal(p.items.at(-1).poolLevel, 1);
+  const p30 = C.poolActivity(logs, [], C.rangeBounds({ preset: '30d' }, NOW), true); assert.equal(p30.assigned, 2);
+});
+t('custom report: range, filters, group, sort', () => {
+  const rows = [
+    { ticket_no: 'A', status: 'pending', operator: 'X', first_call_utc: '2026-10-26T10:00:00+05:30', call_count: 3 },
+    { ticket_no: 'B', status: 'completed', operator: 'X', first_call_utc: '2026-10-25T10:00:00+05:30', call_count: 1 },
+    { ticket_no: 'C', status: 'pending', operator: 'Y', first_call_utc: '2026-08-01T10:00:00+05:30', call_count: 2 }];
+  const r = R.runReport('requests', rows, { range: { preset: 'all' }, filters: [{ field: 'status', op: 'eq', value: 'pending' }], group: 'operator', sort: 'call_count', dir: -1 });
+  assert.deepEqual(r.rows.map((x) => x.ticket_no), ['A', 'C']);
+  assert.deepEqual(r.groups.map((g) => [g.value, g.count]), [['X', 1], ['Y', 1]]);
+  const r2 = R.runReport('requests', rows, { filters: [{ field: 'status', op: 'in', value: 'pending, completed' }, { field: 'call_count', op: 'gte', value: '2' }] });
+  assert.deepEqual(r2.rows.map((x) => x.ticket_no), ['A', 'C']);
+});
 console.log('all tests passed');

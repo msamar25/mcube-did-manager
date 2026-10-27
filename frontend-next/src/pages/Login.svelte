@@ -3,10 +3,10 @@
   // In design-preview builds nothing leaves the browser and any 6 digits are accepted.
   import { signIn, session, startLogin, verifyLogin } from '../lib/session.svelte.js';
   import { LIVE } from '../lib/data/source.js';
-  import { api } from '../lib/data/api.js';
   import Icon from '../components/Icon.svelte';
+  import OtpInput from '../components/OtpInput.svelte';
   import UnextLogo from '../components/UnextLogo.svelte';
-  import LifelineFallback from '../components/LifelineFallback.svelte';
+  import HubFallback from '../components/HubFallback.svelte';
   import { onMount } from 'svelte';
 
   let step = $state('creds'), email = $state(LIVE ? '' : 'admin@example-unext.in'), pin = $state(''), challenge = $state(''), expiresAt = $state(0), now = $state(Date.now()), otp = $state(''), role = $state('admin'), busy = $state(false), err = $state(''), show = $state(false);
@@ -16,38 +16,33 @@
     const small = matchMedia('(max-width: 900px)').matches || (navigator.deviceMemory || 8) <= 2, reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     let gl = false; try { const c = document.createElement('canvas'); gl = !!(c.getContext('webgl2') || c.getContext('webgl')); } catch {}
     if (small || reduced || !gl) { mode = 'static'; return; }
-    import('../three/LifelineScene.js').then(({ LifelineScene }) => { if (dead) return; try { scene = new LifelineScene(stage, { onStep: (x) => (story = x) }); window.__lifeline = scene; mode = 'live'; } catch { mode = 'static'; } }).catch(() => (mode = 'static'));
+    // same UNext hub as the dashboard, in showcase mode (no data needed before sign-in)
+    // load the 3D backdrop once the page is idle, so the sign-in form is responsive first
+    const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 250));
+    idle(() => { if (dead) return; import('../three/SupportHubScene.js').then(({ SupportHubScene }) => { if (dead) return; try { scene = new SupportHubScene(stage, { showcase: true, reserve: '.caption, .illus', onStep: (x) => (story = x) }); window.__lifeline = scene; mode = 'live'; } catch { mode = 'static'; } }).catch(() => (mode = 'static')); });
     return () => { dead = true; scene?.dispose(); };
   });
 
-  // Render Free sleeps when idle; the first request can take ~50 s. Wake it while the user types.
-  let server = $state(LIVE ? 'waking' : 'ready');
-  onMount(() => {
-    if (!LIVE) return;
-    let dead = false;
-    (async () => { for (let i = 0; i < 4 && !dead; i++) { try { await api('/api/health', { auth: false, timeout: 90000 }); server = 'ready'; return; } catch { server = 'waking'; } } if (!dead) server = 'down'; })();
-    return () => { dead = true; };
-  });
   function focusOnMount(node) { node.focus(); }
   $effect(() => { if (step !== 'otp') return; const t = setInterval(() => (now = Date.now()), 1000); return () => clearInterval(t); });
   let left = $derived(Math.max(0, Math.ceil((expiresAt - now) / 1000)));
   async function submit(e) {
-    e.preventDefault(); err = '';
+    e?.preventDefault?.(); if (busy) return; err = '';
     if (step === 'creds') {
       if (!/^\S+@\S+\.\S+$/.test(email)) return (err = 'Enter a valid work email.');
       if (pin.length < 4) return (err = 'Enter your PIN.');
       if (!LIVE) { busy = true; setTimeout(() => { busy = false; step = 'otp'; }, 500); return; }
       busy = true;
-      try { const r = await startLogin(email, pin); server = 'ready'; challenge = r.challenge_id; expiresAt = Date.now() + Number(r.expires_in || 300) * 1000; now = Date.now(); pin = ''; otp = ''; step = 'otp'; }
+      try { const r = await startLogin(email, pin); challenge = r.challenge_id; expiresAt = Date.now() + Number(r.expires_in || 300) * 1000; now = Date.now(); pin = ''; otp = ''; step = 'otp'; }
       catch (x) { err = x.message || 'Unable to send the code.'; }
       finally { busy = false; }
     } else {
       otp = String(otp).replace(/\D/g, '').slice(0, 6);
       if (!/^\d{6}$/.test(otp)) return (err = 'Enter the 6-digit code sent to your email.');
-      if (!LIVE) { busy = true; setTimeout(() => { busy = false; signIn(role); location.hash = '#/dashboard/overview'; }, 450); return; }
+      if (!LIVE) { busy = true; setTimeout(() => { busy = false; signIn(role); }, 450); return; }
       if (left <= 0) return (err = 'The code has expired. Go back and request a new one.');
       busy = true;
-      try { await verifyLogin(challenge, otp); location.hash = '#/dashboard/overview'; }
+      try { await verifyLogin(challenge, otp); }
       catch (x) { err = x.message || 'Verification failed.'; otp = ''; }
       finally { busy = false; }
     }
@@ -57,14 +52,14 @@
 <div class="login">
   <section class="visual" aria-label="Illustrative animation of UNext support keeping the admissions journey moving">
     <div class="stage" bind:this={stage} class:hidden={mode === 'static'}></div>
-    {#if mode === 'static'}<div class="fallback"><LifelineFallback /></div>{/if}
+    {#if mode === 'static'}<div class="fallback"><HubFallback /></div>{/if}
     {#if mode === 'loading'}<div class="loading"><span></span>Loading 3D view…</div>{/if}
     <div class="caption">
-      <span class="eyebrow">UNext operations lifeline</span>
-      <p>Admissions and enrollment support for MAHE, MUJ and SMU online programmes.</p>
+      <span class="eyebrow">UNext L1 Support Hub</span>
+      <p>Every ticket tracked from raised to resolved.</p>
       {#if story}
         <div class="steps" aria-live="off">
-          {#each ['Journey', 'Issue', 'Ticket', 'L1 resolving', 'Resolved', 'Enrolled'] as l, i}<span class:on={story.phase === i} class:done={story.phase > i} class:warn={i === 1 || i === 2}>{l}</span>{/each}
+          {#each ['Ticket raised', 'L1 investigating', 'In progress', story.failed ? 'Failed' : 'Resolved'] as l, i}<span class:on={story.phase === i} class:done={story.phase > i} class:warn={i === 0} class:bad={i === 3 && story.failed && story.phase === 3}>{l}</span>{/each}
         </div>
       {/if}
     </div>
@@ -88,16 +83,15 @@
         </div>{/if}
       {:else}
         <div class="note"><Icon name="mail" size={15} /><span>We sent a 6-digit code to <b>{email}</b>. {#if LIVE}{left > 0 ? `It expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}.` : 'It has expired.'}{:else}It expires in 5 minutes.{/if}</span></div>
-        <label class="field">One-time code
-          <input class="input otp" inputmode="numeric" maxlength="6" bind:value={otp} placeholder="6-digit code" autocomplete="one-time-code" use:focusOnMount aria-label="One-time code" />
-        </label>
+        <div class="field"><span>One-time code</span>
+          <OtpInput bind:value={otp} disabled={busy} oncomplete={() => submit()} />
+        </div>
         <button type="button" class="link" onclick={() => (step = 'creds')}>← Use a different email</button>
       {/if}
-      {#if LIVE && server !== 'ready' && step === 'creds'}<div class="note {server === 'down' ? 'bad' : ''}" role="status"><Icon name={server === 'down' ? 'alert' : 'clock'} size={15} />{server === 'down' ? 'The server is not responding. Please try again in a minute.' : 'Waking up the server… this can take up to a minute after a quiet period.'}</div>{/if}
       {#if session.expiredMessage && step === 'creds' && !err}<div class="note warn" role="status"><Icon name="clock" size={15} />{session.expiredMessage}</div>{/if}
       {#if err}<div class="note bad" role="alert"><Icon name="alert" size={15} />{err}</div>{/if}
       <button class="btn btn-primary big" disabled={busy}>{busy ? 'Please wait…' : step === 'creds' ? 'Continue' : 'Verify & sign in'}<Icon name="arrow" size={15} /></button>
-      {#if LIVE}<p class="fine">For authorised UNext staff. Codes are sent by email and expire after 5 minutes; sessions last 8 hours.</p>
+      {#if LIVE}<p class="fine">For authorised UNext staff.</p>
       {:else}<p class="fine"><span class="demo-flag">Design preview</span> Any email, any PIN of 4+ digits and any 6-digit code work here. Nothing is sent.</p>{/if}
     </form>
     <footer>© UNext · Internal operations portal</footer>
@@ -119,6 +113,7 @@
   .steps span { font-size: 10.5px; font-weight: 650; padding: 3px 8px; border-radius: 99px; background: #eef0f3; color: #7a8395; transition: background .3s, color .3s; }
   .steps span.done { background: #e7f7ee; color: #0b7a3b; }
   .steps span.on { background: #fff1e6; color: #c2540a; box-shadow: inset 0 0 0 1px #f8c9a8; }
+  .steps span.on.bad { background: #fdecea; color: #b42318; box-shadow: inset 0 0 0 1px #f5b5ae; }
   .steps span.on.warn { background: #fff4e0; color: #a35f00; box-shadow: inset 0 0 0 1px #f4cf8f; }
   .illus { position: absolute; right: 18px; bottom: 18px; font-size: 10.5px; color: var(--muted); background: rgba(255,255,255,.7); padding: 3px 8px; border-radius: 6px; }
   .panel-side { display: grid; grid-template-rows: 1fr auto; padding: 24px 40px; background: #fff; }

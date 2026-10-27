@@ -1,6 +1,8 @@
 <script>
   import { db, opStats, totals, poolActivity, trend } from '../lib/store.svelte.js';
   import { poolChart } from '../lib/charts.js';
+  import { rangePool, rangeTrend } from '../lib/range.svelte.js';
+  import RangePicker from '../components/RangePicker.svelte';
   import { poolRunway } from '../lib/calc.js';
   import { ago, n, pct, downloadCsv } from '../lib/format.js';
   import { DEFAULT_RULES } from '../lib/risk.js';
@@ -17,28 +19,28 @@
   let ops = $derived(opStats());
   let t = $derived(totals());
   let pool = $derived(db.inventory.filter((i) => i.status === 'pool').sort((a, b) => a.fifo - b.fifo));
-  // From Change_Logs: exact replacements, and runway = pool ÷ 7-day average replacements per day
-  let pc = $derived(poolChart(poolActivity()));
-  let run = $derived(poolRunway(t.pool, trend()));
+  // From Change_Logs: exact replacements, and runway = pool ÷ average replacements per day over the chosen range
+  let pc = $derived(poolChart(rangePool()));
+  let tr = $derived(rangeTrend());
+  let run = $derived(poolRunway(t.pool, tr));
   let threshold = $state(DEFAULT_RULES.minPool), op = $state('all');
   let rows = $derived(pool.filter((p) => op === 'all' || p.operator === op));
   const columns = [
     { key: 'fifo', label: 'FIFO #', num: true, custom: true },
     { key: 'did', label: 'DID', mono: true, strong: true },
-    { key: 'operator', label: 'Operator', custom: true },
-    { key: 'operator', label: 'Operator' }
+    { key: 'operator', label: 'Operator', custom: true }
   ];
 </script>
 
-<PageHead title="Pool Intelligence" sub="Availability, FIFO order and distribution of unassigned DIDs" eyebrow="Command Center">
+<PageHead title="Pool Intelligence" eyebrow="Command Center">
   {#snippet actions()}<button class="btn" onclick={() => downloadCsv(pool, 'did-pool-fifo.csv')}><Icon name="download" size={14} />Export FIFO</button>{/snippet}
 </PageHead>
 
 <div class="kpis">
   <Kpi label="Available pool" value={n(t.pool)} sub="{pct((t.pool / t.total) * 100)} of all DIDs" icon="pool" tone="info" />
   <Kpi label="Next FIFO DID" value={pool[0]?.did || '—'} sub="{pool[0]?.operator} · position 1" icon="arrow" tone="brand" />
-  <Kpi label="Assigned · 24h" value={n(poolActivity().assigned24)} sub="verified replacements (Change_Logs)" icon="trend" />
-  <Kpi label="Pool runway" value={run.days === null ? '—' : run.days + ' days'} sub={run.days === null ? 'no replacements in 7 days' : `at ${run.perDay}/day (7-day average)`} icon="clock" tone={run.days !== null && run.days < 7 ? 'warn' : 'ok'} />
+  <Kpi label="Assigned · 24h" value={n(poolActivity().assigned24)} sub="verified replacements" icon="trend" />
+  <Kpi label="Pool runway" value={run.days === null ? '—' : run.days + ' days'} sub={run.days === null ? `no replacements · ${tr.label}` : `at ${run.perDay}/day · ${tr.label}`} icon="clock" tone={run.days !== null && run.days < 7 ? 'warn' : 'ok'} />
 </div>
 
 <div class="grid">
@@ -58,17 +60,17 @@
         {/each}
       </div>
     </div>
-    <div class="note"><Icon name="info" size={14} />The threshold here is for analysis only. It doesn't change allocation, which always takes the next DID in MCube FIFO order.</div>
   </div>
   <div class="panel panel-pad">
-    <div class="panel-head"><span class="panel-title">Pool activity · 24h</span><span class="legend">Pool now <b>{n(pc.poolNow)}</b></span></div>
-    <Bars labels={pc.labels} values={pc.series[0].values} height={200} label="Verified replacements from the pool, last 24 hours" unit=" assigned" />
+    <div class="panel-head"><span class="panel-title">Pool activity</span><span class="legend">Pool now <b>{n(pc.poolNow)}</b></span></div>
+    <RangePicker />
+    <Bars labels={pc.labels} values={pc.series[0].values} height={200} label="Verified replacements from the pool" unit=" assigned" />
     <p class="cnote">{pc.note}</p>
   </div>
   <div class="panel panel-pad fifo">
     <div class="panel-head"><span class="panel-title">FIFO queue</span>
       <select class="select" bind:value={op} aria-label="Operator"><option value="all">All operators</option>{#each ops as o}<option value={o.key}>{o.key}</option>{/each}</select></div>
-    <DataTable {rows} {columns} pageSize={9} dense rowKey={(r) => r.did}>
+    <DataTable id="pool" {rows} {columns} pageSize={9} dense rowKey={(r) => r.did}>
       {#snippet cell(r, c)}
         {#if c.key === 'fifo'}{#if r.fifo === 1}<span class="badge pending">Next</span>{:else}<span class="tnum">{r.fifo}</span>{/if}
         {:else if c.key === 'operator'}<OpChip name={r.operator} />
